@@ -1,5 +1,21 @@
-#include <Arduino.h>
+/*
+  _                _ _            _       ________   ___   __   
+ | |    ___   __ _(_) |_ ___  ___| |__   |__  / _ \ / _ \ / /_  
+ | |   / _ \ / _` | | __/ _ \/ __| '_ \    / / (_) | | | | '_ \ 
+ | |__| (_) | (_| | | ||  __/ (__| | | |  / /_\__, | |_| | (_) |
+ |_____\___/ \__, |_|\__\___|\___|_| |_| /____| /_/ \___/ \___/ 
+ __        __|___/__ _      _    ____ ___                       
+ \ \      / (_)  ___(_)    / \  |  _ \_ _|                      
+  \ \ /\ / /| | |_  | |   / _ \ | |_) | |                       
+   \ V  V / | |  _| | |  / ___ \|  __/| |                       
+    \_/\_/  |_|_|   |_| /_/   \_\_|  |___|                      
+                                                                
+ A Wifi API for the Logitech Z906 Speakers
+ by Albin Winkelmann
 
+*/
+
+#include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 #include <DNSServer.h>
@@ -8,6 +24,8 @@
 #include <ArduinoOTA.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
+
+#include "Secret.h"
 
 const char* ssid = "..........";
 const char* password = "..........";
