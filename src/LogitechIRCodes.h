@@ -1,0 +1,14 @@
+#define POWER_IR  0xFE 
+#define INPUT_IR  0xEF 
+#define MUTE_IR   0xA8 
+#define LEVEL_IR  0xAF 
+#define PLUS_IR   0xAA 
+#define EFFECT_IR 0x8F 
+#define MINUS_IR  0xA9 
+#define INPUT1_IR 0xDF 
+#define INPUT2_IR 0xBE 
+#define INPUT3_IR 0xCF 
+#define INPUT4_IR 0xCE 
+#define INPUT5_IR 0xBF 
+#define AUX_IR    0xBD 
+#define TEST_IR   0x7F 
