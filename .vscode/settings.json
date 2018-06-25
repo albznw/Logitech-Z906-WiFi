@@ -4,6 +4,10 @@
         "PLATFORMIO_CALLER": "vscode"
     },
     "files.associations": {
-        "array": "cpp"
+        "array": "cpp",
+        "deque": "cpp",
+        "unordered_map": "cpp",
+        "vector": "cpp",
+        "initializer_list": "cpp"
     }
 }
