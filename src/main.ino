@@ -26,9 +26,12 @@
 #include <ArduinoJson.h>
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
+#include <IRrecv.h>
 #include <EEPROM.h>
 
+
 #include "Secret.h"
+#define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
 
 #define OTA_HOSTNAME                ""       // Leave empty for esp8266-[ChipID]
 #define WIFI_MANAGER_STATION_NAME   ""       // Leave empty for auto generated name ESP + ChipID
@@ -40,44 +43,45 @@
 
 ESP8266WebServer server(80);
 IRsend irsend(IR_LED);
+IRrecv rec(D1);
 
-byte soundLevel;
+bool OTA_ON = false;
+int8_t soundLevel;
 
-enum Input { AUX, Input1, Input2, Input3, Input4, Input5 };
-String inputs[] { "AUX", "Input1", "Input2", "Input3", "Input4", "Input5" };
+enum Input : byte { AUX, Input1, Input2, Input3, Input4, Input5 };
+const char* inputs[] { "AUX", "Input1", "Input2", "Input3", "Input4", "Input5" };
 Input currentInput;
 
-enum Effect { Surround, Music, Stereo };
-String effects[] { "Surround", "Music", "Stereo" };
+enum Effect : byte { Surround, Music, Stereo };
+const char* effects[] { "Surround", "Music", "Stereo" };
 Effect currentEffectOnInput[5];
 
-enum Mode {
-  Off,
-  On
-};
+enum Mode : byte { Off, On };
+const char* modes[] = { "Off", "On" };
 Mode currentMode = Off;
 
-String modes[] = { "Off", "On" };
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
-  testShit();
 
   setupWifiManager();
   setupOTA();
   setupWebServer();
   setupIR();
 
+  setupEEPROM();
+  loadSettings();
+  printSettings();
+
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-  
 }
 
 void loop() {
   checkIfStillOn();
-  ArduinoOTA.handle();
+  if(OTA_ON) ArduinoOTA.handle();
   server.handleClient();
 }
 
@@ -96,7 +100,13 @@ void testShit() {
 
   Serial.println("1: " + one);
   Serial.println("2: " + two);
-  Serial.println(getStringIndex("Input3", inputs));
+  Serial.println(getStringIndex("Input3", inputs, ARRAY_SIZE(inputs)));
+
+  loadSettings();
+  unsigned long start = micros();
+  saveSettings();
+  unsigned long finish = micros();
+  Serial.printf("Done, took %u µs", finish - start);
 }
 
 void setupOTA() {
@@ -220,9 +230,41 @@ void setupWebServer() {
     }
     // Setters
     else if(method == "setSettings") {
-      if(json["input"])       changeInput((Input)getStringIndex(json["input"], inputs));
-      if(json["effect"])      changeEffect((Effect)getStringIndex(json["effect"], effects));
-      if(json["soundlevel"])  changeSoundLevel(json["soundlevel"]);
+      bool somethingChanged = false;
+
+      const char* input = reqjson["input"];
+      if(input) {
+        Serial.println("[setSettings] Input setting detected");
+        changeInput((Input)getStringIndex(input, inputs, ARRAY_SIZE(inputs)));
+        somethingChanged = true;
+      }
+
+      const char* effect = reqjson["effect"];
+      if(effect) {
+        Serial.println("[setSettings] Effect setting detected");
+        changeEffect((Effect)getStringIndex(effect, effects, ARRAY_SIZE(effects)));
+        somethingChanged = true;
+      }
+
+      int soundlevel = reqjson["soundlevel"];
+      if(soundlevel) {
+        Serial.println("[setSettings] Soundlevel setting detected");
+        changeSoundLevel(soundlevel);
+        somethingChanged = true;
+      }
+      if(somethingChanged) {
+        getSettings(json);
+      } else {
+        json["message"] = "You didn't specify input, effect or soundlevel";
+      }
+    } else if(method = "reset") {
+      soundLevel = 0;
+      currentInput = Input1;
+      for(uint8_t i= 0; i < 5; i++) {
+        currentEffectOnInput[i] = Surround;
+      }
+      json["message"] = "Settings resetted";
+      getSettings(json);
     }
     else {
       String error = "Method: \"" + String(method) + "\" does not exist";
@@ -269,63 +311,92 @@ String getChipStatsJSON() {
 
 void getSettings(JsonObject &json) {
   JsonObject& settings = json.createNestedObject("settings");
-  settings["mode"] = currentMode;
+  settings["mode"] = modes[currentMode];
   settings["soundlevel"] = soundLevel;
-  settings["input"] = currentInput;
+  settings["input"] = inputs[currentInput];
+  settings["effect"] = effects[currentEffect()];
 }
 
 void loadSettings() {
   soundLevel = EEPROM.read(1);
+  if(soundLevel > 128 || soundLevel < 0) {
+    soundLevel = 0;
+  }
+
   currentInput = (Input)EEPROM.read(2);
+  currentInput = currentInput < 6 ? currentInput : AUX;
 
   for(uint8_t i= 0; i < 5; i++) {
-    currentEffectOnInput[0] = (Effect)EEPROM.read(3 + i);
+    currentEffectOnInput[i] = (Effect)EEPROM.read(3 + i);
+    currentEffectOnInput[i] = currentEffectOnInput[i] < 3 ? currentEffectOnInput[i] : Surround;
   }
+}
+
+void printSettings() {
+  Serial.printf("\nInput: %s\n", inputs[currentInput]);
+  Serial.printf("Soundlevel: %d\n", soundLevel);
+  Serial.printf("Effect: %s\n\n", effects[currentEffect()]);
 }
 
 void saveSettings() {
   EEPROM.write(1, soundLevel);
   EEPROM.write(2, currentInput);
   for(uint8_t i= 0; i < 5; i++) {
-    EEPROM.write(3 + i, currentEffectOnInput[0]);
+    EEPROM.write(3 + i, currentEffectOnInput[i]);
   }
   EEPROM.commit();
 }
 
 void turnOn() {
-  currentMode = On;
-  irsend.sendNEC(POWER_IR);
-  saveSettings();
+  if(currentMode != On) {
+    irsend.sendNEC(POWER_IR, 32);
+    currentMode = On;
+    saveSettings();
+  }
 }
 
 void turnOff() {
-  currentMode = Off;
-  irsend.sendNEC(POWER_IR);
-  saveSettings();
+  if(currentMode != Off) {
+    irsend.sendNEC(POWER_IR, 32);
+    currentMode = Off;
+    saveSettings();
+  }
 }
 
 void changeInput(Input input) {
-  Serial.printf("Changing input to: %s", inputs[input]);
+  Serial.printf("[changeInput] Changing input to: %s", inputs[input]);
   switch(input) {
     case AUX:
-      irsend.sendNEC(AUX_IR);
+      irsend.sendNEC(AUX_IR, 32);
       break;
     case Input1:
-      irsend.sendNEC(INPUT1_IR);
+      irsend.sendNEC(INPUT1_IR, 32);
+      break;
+    case Input2:
+      irsend.sendNEC(INPUT2_IR, 32);
+      break;
+    case Input3:
+      irsend.sendNEC(INPUT3_IR, 32);
+      break;
+    case Input4:
+      irsend.sendNEC(INPUT4_IR, 32);
+      break;
+    case Input5:
+      irsend.sendNEC(INPUT5_IR, 32);
       break;
     default:
-      Serial.print("No such input \"");
-      Serial.print(String(input));
-      Serial.println("\"");
+      Serial.println("\tNo such input!");
   }
+  Serial.printf("\n");
   currentInput = input;
   saveSettings();
 }
 
 void changeEffect(Effect effect) {
-  Serial.printf("Changing effect to: %s", effects[effect]);
+  Serial.printf("[changeEffect] Changing effect from: %s to: %s\n", effects[currentEffect()], effects[effect]);
   int8_t diff = effect - currentEffectOnInput[currentInput];
   int8_t ir_send_times = (diff >= 0) ? diff : (abs(diff) + 1) % 3;
+  Serial.printf("[changeEffect] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
 
   for(uint8_t i = 0; i < ir_send_times; i++) {
     irsend.sendNEC(EFFECT_IR);
@@ -336,18 +407,16 @@ void changeEffect(Effect effect) {
   saveSettings();
 }
 
-void changeSoundLevel(byte level) {
-  Serial.printf("Setting sound level to: %u\n", level);
-
-
-}
-
-void plus() {
-  irsend.sendNEC(PLUS_IR);
-}
-
-void minus() {
-  irsend.sendNEC(MINUS_IR);
+void changeSoundLevel(int8_t level) {
+  int8_t diff = level - soundLevel;
+  Serial.printf("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
+  if(diff > 1) {
+    irsend.sendNEC(PLUS_IR, 32, diff);
+  } else if(diff < 0) {
+    irsend.sendNEC(MINUS_IR, 32, -diff);
+  }
+  soundLevel = level;
+  saveSettings();
 }
 
 Effect currentEffect() {
@@ -359,8 +428,9 @@ void checkIfStillOn() {
   currentMode = digitalRead(ON_LED) ? Off : currentMode;
 }
 
-uint8_t getStringIndex(String s, String array[]) {
-  for(uint8_t i = 0; i < sizeof(array); i++) {
+uint8_t getStringIndex(String s, const char* array[], uint8_t len) {
+  Serial.printf("[getStringIndex] Length of array: %d\n", len);
+  for(uint8_t i = 0; i < len; i++) {
     if(s == array[i]) return i;
   }
 } 
