@@ -95,6 +95,7 @@ void setup() {
   setupWifiManager();
   setupOTA();
   setupWebServer();
+  setupMQTT();
   setupIR();
 
   setupEEPROM();
@@ -245,13 +246,14 @@ void setupMQTT() {
 
 bool connectMQTT() {
   while (!mqttclient.connected()) {
-    Serial.print("Connecting to MQTT server... ");
+    Serial.print("[MQTT] Connecting to MQTT server... ");
 
     //if connected, subscribe to the topic(s) we want to be notified about
     if (mqttclient.connect(MQTTClientId, MQTTUsername, MQTTPassword, WillTopic,\
         WillQoS, WillRetain, willMessage)) {
       Serial.println("MTQQ Connected!");
-      mqttclient.subscribe(CommandTopic);
+      if (mqttclient.subscribe(CommandTopic))
+        Serial.printf("[MQTT] Sucessfully subscribed to %s\n", CommandTopic);
       publishMQTT(DebugTopic, FirstMessage);
       return true;
     }
@@ -266,7 +268,7 @@ bool publishMQTT(const char* topic, const char* payload){
   if(mqttclient.publish(topic, payload)) {
     returnBool = true;
     printString = String("[publishMQTT] '" + String(payload) + "' was sent sucessfully to: ");
-  } else{
+  } else {
     returnBool = false;
     printString = String("[publishMQTT] ERROR sending: '" + String(payload) + "' to: ");
   }
@@ -389,7 +391,7 @@ String handleJSONReq(String req) {
     server.send(400, "text/plain", error);
   }
 
-  json.prettyPrintTo(response);
+  json.printTo(response);
   Serial.println("[handleJSON] Response:\n" + response);
   return response;
 }
