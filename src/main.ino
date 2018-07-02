@@ -28,31 +28,58 @@
 #include <IRsend.h>
 #include <IRrecv.h>
 #include <EEPROM.h>
+#include <PubSubClient.h>
 
 
 #include "Secret.h"
 #define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
 
-#define OTA_HOSTNAME                ""       // Leave empty for esp8266-[ChipID]
-#define WIFI_MANAGER_STATION_NAME   ""       // Leave empty for auto generated name ESP + ChipID
+/**************************** General - Settings ******************************/
+#define OTA_HOSTNAME                "Logitech-Z906" // Leave empty for esp8266-[ChipID]
+#define WIFI_MANAGER_STATION_NAME   "Logitech-Z906" // Leave empty for auto generated name ESP + ChipID
 
-#define ON_LED D6                   // The pin that is connected to the on-led on speaker system
-#define IR_LED D2                   // The IR LED pin
+#define ON_LED                D6    // The pin that is connected to the on-led on speaker system
+#define IR_LED                D2    // The IR LED pin
+#define RECV_LED              D1    // The ir reciever pin
 #define MS_BETWEEN_SENDING_IR 10    // Amount of ms to leap between sending commands in a row
 #include "LogitechIRCodes.h"
 
+bool OTA_ON = false; // Turn on OTA
+
+/****************************** MQTT - Settings *******************************/
+// Connection things is found in Secret.h
+#define MQTTClientId        "logitech_z906"
+#define MQTTCategory        "speaker"
+
+#define ClientRoot          MQTTCategory "/" MQTTClientId
+
+// Some examples on how the routes should be
+#define CommandTopic        ClientRoot "/cmnd/json"
+#define StateTopic          ClientRoot "/state/json"
+#define DebugTopic          ClientRoot "/debug"
+#define WillTopic           ClientRoot "/will"
+#define WillQoS             0
+#define WillRetain          false
+const char* willMessage = "clientId has disconnected...";
+
+#define FirstMessage        "I communicate via JSON!"
+
+WiFiClient wificlient;  // is needed for the mqtt client
+PubSubClient mqttclient;
+
 ESP8266WebServer server(80);
 IRsend irsend(IR_LED);
-IRrecv rec(D1);
+IRrecv rec(RECV_LED);
 
-bool OTA_ON = false;
-int8_t soundLevel;
+/********************************* Variables **********************************/
 
-enum Input : byte { AUX, Input1, Input2, Input3, Input4, Input5 };
+byte soundLevel;
+
+enum Input { AUX, Input1, Input2, Input3, Input4, Input5 };
 const char* inputs[] { "AUX", "Input1", "Input2", "Input3", "Input4", "Input5" };
 Input currentInput;
 
-enum Effect : byte { Surround, Music, Stereo };
+enum Effect { Surround, Music, Stereo };
 const char* effects[] { "Surround", "Music", "Stereo" };
 Effect currentEffectOnInput[5];
 
@@ -71,7 +98,6 @@ void setup() {
   setupIR();
 
   setupEEPROM();
-  loadSettings();
   printSettings();
 
   Serial.println("Ready");
@@ -83,6 +109,7 @@ void loop() {
   checkIfStillOn();
   if(OTA_ON) ArduinoOTA.handle();
   server.handleClient();
+  mqttclient.loop();
 }
 
 void testShit() {
@@ -189,92 +216,10 @@ void setupWebServer() {
   });
 
   server.on("/", HTTP_POST, [](){
-    StaticJsonBuffer<200> reqBuffer;
-    JsonObject& reqjson = reqBuffer.parseObject(server.arg("plain"));
-
     // Print message
     Serial.println("\nPOST \"\\\": ");
-    reqjson.prettyPrintTo(Serial);
-    Serial.printf("\n");
-
-    const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
-    DynamicJsonBuffer respBuffer(bufferSize);
-    JsonObject& json = respBuffer.createObject();
-
-    String response = "";
-    String method = reqjson["method"];
-    if(method == "turnOn") {
-      Serial.println("Calling turnOn");
-      turnOn();
-    } else if(method == "turnOff") {
-      Serial.println("Calling turnOff");
-      turnOff();
-    }
-    // Getters 
-    else if(method == "getSettings") {
-      Serial.println("Calling getSettings");
-      getSettings(json);
-    } else if(method == "getMode") {
-      Serial.println("Calling getMode");
-      Serial.println(modes[currentMode]);
-      json["mode"] = modes[currentMode];
-    } else if(method == "getSoundLevel") {
-      Serial.println("Calling getSoundLevel");
-      json["soundlevel"] = soundLevel;
-    } else if(method == "getInput") {
-      Serial.println("Calling getInput");
-      json["input"] = inputs[currentInput];
-    } else if(method == "getEffect") {
-      Serial.println("Calling getEffect");
-      json["effect"] = effects[currentEffect()];
-    }
-    // Setters
-    else if(method == "setSettings") {
-      bool somethingChanged = false;
-
-      const char* input = reqjson["input"];
-      if(input) {
-        Serial.println("[setSettings] Input setting detected");
-        changeInput((Input)getStringIndex(input, inputs, ARRAY_SIZE(inputs)));
-        somethingChanged = true;
-      }
-
-      const char* effect = reqjson["effect"];
-      if(effect) {
-        Serial.println("[setSettings] Effect setting detected");
-        changeEffect((Effect)getStringIndex(effect, effects, ARRAY_SIZE(effects)));
-        somethingChanged = true;
-      }
-
-      int soundlevel = reqjson["soundlevel"];
-      if(soundlevel) {
-        Serial.println("[setSettings] Soundlevel setting detected");
-        changeSoundLevel(soundlevel);
-        somethingChanged = true;
-      }
-      if(somethingChanged) {
-        getSettings(json);
-      } else {
-        json["message"] = "You didn't specify input, effect or soundlevel";
-      }
-    } else if(method = "reset") {
-      soundLevel = 0;
-      currentInput = Input1;
-      for(uint8_t i= 0; i < 5; i++) {
-        currentEffectOnInput[i] = Surround;
-      }
-      json["message"] = "Settings resetted";
-      getSettings(json);
-    }
-    else {
-      String error = "Method: \"" + String(method) + "\" does not exist";
-      Serial.println(error);
-      server.send(400, "text/plain", error);
-    }
-
-    json.prettyPrintTo(response);
-    Serial.println("Response:\n" + response);
-    server.send(200, "application/json", response);
+    server.send(200, "application/json", \
+      handleJSONReq(server.arg("plain")));
   });
 
   // Start webserver
@@ -290,6 +235,163 @@ void setupIR() {
 void setupEEPROM() {
   EEPROM.begin(512);
   loadSettings();
+}
+
+// Be sure to setup WIFI before running this method!
+void setupMQTT() {
+  mqttclient = PubSubClient(Broker, Port, callback, wificlient);
+  connectMQTT();
+}
+
+bool connectMQTT() {
+  while (!mqttclient.connected()) {
+    Serial.print("Connecting to MQTT server... ");
+
+    //if connected, subscribe to the topic(s) we want to be notified about
+    if (mqttclient.connect(MQTTClientId, MQTTUsername, MQTTPassword, WillTopic,\
+        WillQoS, WillRetain, willMessage)) {
+      Serial.println("MTQQ Connected!");
+      mqttclient.subscribe(CommandTopic);
+      publishMQTT(DebugTopic, FirstMessage);
+      return true;
+    }
+  }
+  Serial.println("Failed to connect to MQTT Server");
+  return false;
+}
+
+bool publishMQTT(const char* topic, const char* payload){
+  String printString = "";
+  bool returnBool = false;
+  if(mqttclient.publish(topic, payload)) {
+    returnBool = true;
+    printString = String("[publishMQTT] '" + String(payload) + "' was sent sucessfully to: ");
+  } else{
+    returnBool = false;
+    printString = String("[publishMQTT] ERROR sending: '" + String(payload) + "' to: ");
+  }
+  printString += topic;
+  Serial.println(printString);
+  return returnBool;
+}
+
+bool publishMQTT(const char* topic, String payload){
+  return publishMQTT(topic, payload.c_str());
+}
+
+String payloadToString(byte* payload, unsigned int length) {
+  char message_buff[length];
+  int i = 0;
+  for (i = 0; i < length; i++) {
+      message_buff[i] = payload[i];
+    }
+  message_buff[i] = '\0';
+  return String(message_buff);
+}
+
+void callback(char* topic, byte* payload, unsigned int length) {
+
+  //convert topic to string to make it easier to work with
+  String topicStr = topic;
+  String payloadStr = payloadToString(payload, length);
+
+  Serial.println("[MQTT][callback] Callback update.");
+  Serial.println(String("[MQTT][callback] Topic: " + topicStr));
+
+  if(topicStr.equals(CommandTopic)) {
+    publishMQTT(StateTopic, handleJSONReq(payloadStr));
+  } else {
+    publishMQTT(DebugTopic, String("[MQTT][callback] No such MQTT topic \""\
+     + topicStr +"\""));
+  }
+}
+
+String handleJSONReq(String req) {
+  StaticJsonBuffer<200> reqBuffer;
+  JsonObject& reqjson = reqBuffer.parseObject(req);
+
+  Serial.print("[handleJSON] Payload: ");
+  reqjson.prettyPrintTo(Serial);
+  Serial.printf("\n");
+
+  const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
+  DynamicJsonBuffer respBuffer(bufferSize);
+  JsonObject& json = respBuffer.createObject();
+
+  String response = "";
+  String method = reqjson["method"];
+  if(method == "turnOn") {
+    Serial.println("[handleJSON] Calling turnOn");
+    turnOn();
+  } else if(method == "turnOff") {
+    Serial.println("[handleJSON] Calling turnOff");
+    turnOff();
+  }
+  // Getters 
+  else if(method == "getSettings") {
+    Serial.println("[handleJSON] Calling getSettings");
+    getSettings(json);
+  } else if(method == "getMode") {
+    Serial.println("[handleJSON] Calling getMode");
+    Serial.println(modes[currentMode]);
+    json["mode"] = modes[currentMode];
+  } else if(method == "getSoundLevel") {
+    Serial.println("[handleJSON] Calling getSoundLevel");
+    json["soundlevel"] = soundLevel;
+  } else if(method == "getInput") {
+    Serial.println("[handleJSON] Calling getInput");
+    json["input"] = inputs[currentInput];
+  } else if(method == "getEffect") {
+    Serial.println("[handleJSON] Calling getEffect");
+    json["effect"] = effects[currentEffect()];
+  }
+  // Setters
+  else if(method == "setSettings") {
+    bool somethingChanged = false;
+
+    const char* input = reqjson["input"];
+    if(input) {
+      Serial.println("[setSettings] Input setting detected");
+      changeInput((Input)getStringIndex(input, inputs, ARRAY_SIZE(inputs)));
+      somethingChanged = true;
+    }
+
+    const char* effect = reqjson["effect"];
+    if(effect) {
+      Serial.println("[setSettings] Effect setting detected");
+      changeEffect((Effect)getStringIndex(effect, effects, ARRAY_SIZE(effects)));
+      somethingChanged = true;
+    }
+
+    int soundlevel = reqjson["soundlevel"];
+    if(soundlevel) {
+      Serial.println("[setSettings] Soundlevel setting detected");
+      changeSoundLevel(soundlevel);
+      somethingChanged = true;
+    }
+    if(somethingChanged) {
+      getSettings(json);
+    } else {
+      json["message"] = "You didn't specify input, effect or soundlevel";
+    }
+  } else if(method = "reset") {
+    soundLevel = 0;
+    currentInput = Input1;
+    for(uint8_t i= 0; i < 5; i++) {
+      currentEffectOnInput[i] = Surround;
+    }
+    json["message"] = "Settings resetted";
+    getSettings(json);
+  }
+  else {
+    String error = "Method: \"" + String(method) + "\" does not exist";
+    Serial.println(error);
+    server.send(400, "text/plain", error);
+  }
+
+  json.prettyPrintTo(response);
+  Serial.println("[handleJSON] Response:\n" + response);
+  return response;
 }
 
 String getChipStatsJSON() {
