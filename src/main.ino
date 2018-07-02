@@ -27,6 +27,7 @@
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
 #include <IRrecv.h>
+#include <IRutils.h>
 #include <EEPROM.h>
 #include <PubSubClient.h>
 
@@ -40,7 +41,7 @@
 
 #define ON_LED                D6    // The pin that is connected to the on-led on speaker system
 #define IR_LED                D2    // The IR LED pin
-#define RECV_LED              D1    // The ir reciever pin
+#define RECV_IR               D1    // The ir reciever pin
 #define MS_BETWEEN_SENDING_IR 10    // Amount of ms to leap between sending commands in a row
 #include "LogitechIRCodes.h"
 
@@ -68,8 +69,12 @@ WiFiClient wificlient;  // is needed for the mqtt client
 PubSubClient mqttclient;
 
 ESP8266WebServer server(80);
+
+#define CAPTURE_BUFFER_SIZE 64
+#define MIN_UNKNOWN_SIZE    12
+IRrecv irrecv(RECV_IR, CAPTURE_BUFFER_SIZE);
 IRsend irsend(IR_LED);
-IRrecv rec(RECV_LED);
+decode_results results;  // Somewhere to store the results
 
 /********************************* Variables **********************************/
 
@@ -87,6 +92,33 @@ enum Mode : byte { Off, On };
 const char* modes[] = { "Off", "On" };
 Mode currentMode = Off;
 
+#define DEBUG false
+// conditional debugging
+#if DEBUG 
+
+  #define beginDebug()      do { Serial.begin (115200); } while (0)
+  #define Trace(x)          Serial.print      (x)
+  #define Trace2(x,y)       Serial.print      (x,y)
+  #define Traceln(x)        Serial.println    (x)
+  #define Traceln2(x,y)     Serial.println    (x,y)
+  #define Tracef(x)         Serial.printf     (x)
+  #define Tracef2(x,y)      Serial.printf     (x,y)
+  #define Tracef3(x,y,z)    Serial.printf     (x,y,z)
+  #define Tracef4(x,y,z,u)  Serial.printf     (x,y,z,u)
+  #define TraceFunc()       do { Trace (F("In function: ")); Serial.println(__PRETTY_FUNCTION__); } while (0)
+
+#else
+  #define beginDebug()      ((void) 0)
+  #define Trace(x)          ((void) 0)
+  #define Trace2(x,y)       ((void) 0)
+  #define Traceln(x)        ((void) 0)
+  #define Traceln2(x,y)     ((void) 0)
+  #define Tracef(x)         ((void) 0)
+  #define Tracef2(x,y)      ((void) 0)
+  #define Tracef3(x,y,z)    ((void) 0)
+  #define Tracef4(x,y,z,u)  ((void) 0)
+  #define TraceFunc()       ((void) 0)
+#endif // DEBUG
 
 void setup() {
   Serial.begin(115200);
@@ -106,11 +138,20 @@ void setup() {
   Serial.println(WiFi.localIP());
 }
 
+unsigned long current = micros();
+unsigned long last = micros();
+
 void loop() {
+  current = micros();
+
   checkIfStillOn();
   if(OTA_ON) ArduinoOTA.handle();
   server.handleClient();
   mqttclient.loop();
+  handleIR();
+
+  Serial.println(current-last);
+  last = current;
 }
 
 void testShit() {
@@ -138,7 +179,7 @@ void testShit() {
 }
 
 void setupOTA() {
-  Serial.println("[OTA] Initializing...");
+  Traceln("[OTA] Initializing...");
   // Port defaults to 8266
   // ArduinoOTA.setPort(8266);
 
@@ -211,26 +252,28 @@ void setupWifiManager() {
 }
 
 void setupWebServer() {
-  Serial.println("[Webserver] Initializing...");
+  Traceln("[Webserver] Initializing...");
   server.on("/", HTTP_GET, [](){
     server.send(200, "text/plain", "It works!");
   });
 
   server.on("/", HTTP_POST, [](){
     // Print message
-    Serial.println("\nPOST \"\\\": ");
+    Traceln("\nPOST \"\\\": ");
     server.send(200, "application/json", \
       handleJSONReq(server.arg("plain")));
   });
 
   // Start webserver
   server.begin();
-  Serial.println("[Webserver] Done.");
+  Traceln("[Webserver] Done.");
 }
 
 void setupIR() {
-  Serial.println("[IRSend] Begin");
+  Traceln("[IRSend] Begin");
   irsend.begin();
+  irrecv.setUnknownThreshold(MIN_UNKNOWN_SIZE);
+  irrecv.enableIRIn();
 }
 
 void setupEEPROM() {
@@ -246,19 +289,19 @@ void setupMQTT() {
 
 bool connectMQTT() {
   while (!mqttclient.connected()) {
-    Serial.print("[MQTT] Connecting to MQTT server... ");
+    Trace("[MQTT] Connecting to MQTT server... ");
 
     //if connected, subscribe to the topic(s) we want to be notified about
     if (mqttclient.connect(MQTTClientId, MQTTUsername, MQTTPassword, WillTopic,\
         WillQoS, WillRetain, willMessage)) {
-      Serial.println("MTQQ Connected!");
+      Traceln("MTQQ Connected!");
       if (mqttclient.subscribe(CommandTopic))
-        Serial.printf("[MQTT] Sucessfully subscribed to %s\n", CommandTopic);
+        Tracef2("[MQTT] Sucessfully subscribed to %s\n", CommandTopic);
       publishMQTT(DebugTopic, FirstMessage);
       return true;
     }
   }
-  Serial.println("Failed to connect to MQTT Server");
+  Traceln("Failed to connect to MQTT Server");
   return false;
 }
 
@@ -273,7 +316,7 @@ bool publishMQTT(const char* topic, const char* payload){
     printString = String("[publishMQTT] ERROR sending: '" + String(payload) + "' to: ");
   }
   printString += topic;
-  Serial.println(printString);
+  Traceln(printString);
   return returnBool;
 }
 
@@ -297,8 +340,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   String topicStr = topic;
   String payloadStr = payloadToString(payload, length);
 
-  Serial.println("[MQTT][callback] Callback update.");
-  Serial.println(String("[MQTT][callback] Topic: " + topicStr));
+  Traceln("[MQTT][callback] Callback update.");
+  Traceln(String("[MQTT][callback] Topic: " + topicStr));
 
   if(topicStr.equals(CommandTopic)) {
     publishMQTT(StateTopic, handleJSONReq(payloadStr));
@@ -312,9 +355,9 @@ String handleJSONReq(String req) {
   StaticJsonBuffer<200> reqBuffer;
   JsonObject& reqjson = reqBuffer.parseObject(req);
 
-  Serial.print("[handleJSON] Payload: ");
+  Trace("[handleJSON] Payload: ");
   reqjson.prettyPrintTo(Serial);
-  Serial.printf("\n");
+  Tracef("\n");
 
   const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
   DynamicJsonBuffer respBuffer(bufferSize);
@@ -323,28 +366,28 @@ String handleJSONReq(String req) {
   String response = "";
   String method = reqjson["method"];
   if(method == "turnOn") {
-    Serial.println("[handleJSON] Calling turnOn");
+    Traceln("[handleJSON] Calling turnOn");
     turnOn();
   } else if(method == "turnOff") {
-    Serial.println("[handleJSON] Calling turnOff");
+    Traceln("[handleJSON] Calling turnOff");
     turnOff();
   }
   // Getters 
   else if(method == "getSettings") {
-    Serial.println("[handleJSON] Calling getSettings");
+    Traceln("[handleJSON] Calling getSettings");
     getSettings(json);
   } else if(method == "getMode") {
-    Serial.println("[handleJSON] Calling getMode");
-    Serial.println(modes[currentMode]);
+    Traceln("[handleJSON] Calling getMode");
+    Traceln(modes[currentMode]);
     json["mode"] = modes[currentMode];
   } else if(method == "getSoundLevel") {
-    Serial.println("[handleJSON] Calling getSoundLevel");
+    Traceln("[handleJSON] Calling getSoundLevel");
     json["soundlevel"] = soundLevel;
   } else if(method == "getInput") {
-    Serial.println("[handleJSON] Calling getInput");
+    Traceln("[handleJSON] Calling getInput");
     json["input"] = inputs[currentInput];
   } else if(method == "getEffect") {
-    Serial.println("[handleJSON] Calling getEffect");
+    Traceln("[handleJSON] Calling getEffect");
     json["effect"] = effects[currentEffect()];
   }
   // Setters
@@ -353,21 +396,21 @@ String handleJSONReq(String req) {
 
     const char* input = reqjson["input"];
     if(input) {
-      Serial.println("[setSettings] Input setting detected");
+      Traceln("[setSettings] Input setting detected");
       changeInput((Input)getStringIndex(input, inputs, ARRAY_SIZE(inputs)));
       somethingChanged = true;
     }
 
     const char* effect = reqjson["effect"];
     if(effect) {
-      Serial.println("[setSettings] Effect setting detected");
+      Traceln("[setSettings] Effect setting detected");
       changeEffect((Effect)getStringIndex(effect, effects, ARRAY_SIZE(effects)));
       somethingChanged = true;
     }
 
     int soundlevel = reqjson["soundlevel"];
     if(soundlevel) {
-      Serial.println("[setSettings] Soundlevel setting detected");
+      Traceln("[setSettings] Soundlevel setting detected");
       changeSoundLevel(soundlevel);
       somethingChanged = true;
     }
@@ -387,13 +430,60 @@ String handleJSONReq(String req) {
   }
   else {
     String error = "Method: \"" + String(method) + "\" does not exist";
-    Serial.println(error);
+    Traceln(error);
     server.send(400, "text/plain", error);
   }
 
   json.printTo(response);
-  Serial.println("[handleJSON] Response:\n" + response);
+  Traceln("[handleJSON] Response:\n" + response);
   return response;
+}
+
+void handleIR() {
+  if (irrecv.decode(&results)) {
+    const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
+    DynamicJsonBuffer respBuffer(bufferSize);
+    JsonObject& json = respBuffer.createObject();
+    String resp = "";
+    JsonObject& settings = json.createNestedObject("settings");
+    switch (results.value) {
+      case 0xFFFFFFFF:
+        Traceln("[handleIR] Repeat.");
+        break;
+      case 0x63C98B53:
+        Traceln("[handleIR] Power button pressed.");
+        publishMQTT(StateTopic, "Power was pressed");
+        break;
+      case 0xEFA4E63F:
+        Traceln("[handleIR] Input button pressed.");
+        getSettings(json);
+        json.printTo(resp);
+        publishMQTT(StateTopic, resp);
+        break;
+      case 0x92CA878C:
+        Traceln("[handleIR] Mute button pressed.");
+        
+        settings["soundlevel"] = soundLevel;
+        json.printTo(resp);
+        publishMQTT(StateTopic, resp);
+        break;
+      case 0x58B863E3:
+        Traceln("[handleIR] Level button pressed.");
+        break;
+      case 0x11E728E:
+        Traceln("[handleIR] Minus button pressed.");
+        break;
+      case 0xABB1A8D2:
+        Traceln("[handleIR] Plus button pressed.");
+        break;
+      case 0x48C7229F:
+        Traceln("[handleIR] Effect button pressed.");
+        break;
+      default:
+        Tracef2("No such ir code case: %X\n", results.value);
+    }
+    irrecv.resume();
+  }
 }
 
 String getChipStatsJSON() {
@@ -468,7 +558,7 @@ void turnOff() {
 }
 
 void changeInput(Input input) {
-  Serial.printf("[changeInput] Changing input to: %s", inputs[input]);
+  Tracef2("[changeInput] Changing input to: %s", inputs[input]);
   switch(input) {
     case AUX:
       irsend.sendNEC(AUX_IR, 32);
@@ -489,18 +579,18 @@ void changeInput(Input input) {
       irsend.sendNEC(INPUT5_IR, 32);
       break;
     default:
-      Serial.println("\tNo such input!");
+      Traceln("\tNo such input!");
   }
-  Serial.printf("\n");
+  Tracef("\n");
   currentInput = input;
   saveSettings();
 }
 
 void changeEffect(Effect effect) {
-  Serial.printf("[changeEffect] Changing effect from: %s to: %s\n", effects[currentEffect()], effects[effect]);
+  Tracef3("[changeEffect] Changing effect from: %s to: %s\n", effects[currentEffect()], effects[effect]);
   int8_t diff = effect - currentEffectOnInput[currentInput];
   int8_t ir_send_times = (diff >= 0) ? diff : (abs(diff) + 1) % 3;
-  Serial.printf("[changeEffect] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
+  Tracef3("[changeEffect] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
 
   for(uint8_t i = 0; i < ir_send_times; i++) {
     irsend.sendNEC(EFFECT_IR);
@@ -513,7 +603,7 @@ void changeEffect(Effect effect) {
 
 void changeSoundLevel(int8_t level) {
   int8_t diff = level - soundLevel;
-  Serial.printf("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
+  Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
   if(diff > 1) {
     irsend.sendNEC(PLUS_IR, 32, diff);
   } else if(diff < 0) {
@@ -533,7 +623,7 @@ void checkIfStillOn() {
 }
 
 uint8_t getStringIndex(String s, const char* array[], uint8_t len) {
-  Serial.printf("[getStringIndex] Length of array: %d\n", len);
+  Tracef2("[getStringIndex] Length of array: %d\n", len);
   for(uint8_t i = 0; i < len; i++) {
     if(s == array[i]) return i;
   }
