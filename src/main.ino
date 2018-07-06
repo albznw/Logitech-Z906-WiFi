@@ -243,20 +243,20 @@ void setupOTA() {
 }
 
 void setupWifiManager() {
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
+  // WiFiManager
+  // Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wifiManager;
-  //reset saved settings
-  //wifiManager.resetSettings();
+  // reset saved settings
+  // wifiManager.resetSettings();
   
-  //set custom ip for portal
-  //wifiManager.setAPConfig(IPAddress(10,0,1,1), IPAddress(10,0,1,1), IPAddress(255,255,255,0));
+  // set custom ip for portal
+  // wifiManager.setAPConfig(IPAddress(10,0,1,1), IPAddress(10,0,1,1), IPAddress(255,255,255,0));
 
-  //fetches ssid and pass from eeprom and tries to connect
-  //if it does not connect it starts an access point with the specified name
-  //and goes into a blocking loop awaiting configuration
+  // fetches ssid and pass from eeprom and tries to connect
+  // if it does not connect it starts an access point with the specified name
+  // and goes into a blocking loop awaiting configuration
   if (WIFI_MANAGER_STATION_NAME == "") {
-    //use this for auto generated name ESP + ChipID
+    // use this for auto generated name ESP + ChipID
     wifiManager.autoConnect();
   } else {
     wifiManager.autoConnect(WIFI_MANAGER_STATION_NAME);
@@ -295,12 +295,13 @@ void setupEEPROM() {
   loadSettings();
 }
 
-// Be sure to setup WIFI before running this method!
+/** Be sure to setup WIFI before running this method! */
 void setupMQTT() {
   mqttclient = PubSubClient(Broker, Port, callback, wificlient);
   connectMQTT();
 }
 
+/** Connects to the MQTT broker and subscribes to the topic */
 bool connectMQTT() {
   while (!mqttclient.connected()) {
     Trace("[MQTT] Connecting to MQTT server... ");
@@ -365,6 +366,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+/** For handling requests, both the MQTT and REST requests are parsed here
+ * Returns: response string (with settings formatted as json)
+ */  
 String handleJSONReq(String req) {
   StaticJsonBuffer<200> reqBuffer;
   JsonObject& reqjson = reqBuffer.parseObject(req);
@@ -526,6 +530,7 @@ void handleIR() {
   }
 }
 
+/** Returns a json formatted string with chip status */
 String getChipStatsJSON() {
   const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
   DynamicJsonBuffer jsonBuffer(bufferSize);
@@ -621,6 +626,7 @@ void toggleMute() {
   saveSettings();
 }
 
+/** Sends ir code and saves settings to change to wanted input */
 void changeInput(Input input) {
   Tracef2("[changeInput] Changing input to: %s", inputs[input]);
   switch(input) {
@@ -650,6 +656,7 @@ void changeInput(Input input) {
   saveSettings();
 }
 
+/** Sends ir code and saves settings to change to wanted effect */
 void changeEffect(Effect effect) {
   Tracef3("[changeEffect] Changing effect from: %s to: %s\n", effects[currentEffect()], effects[effect]);
   int8_t diff = effect - currentEffectOnInput[currentInput];
@@ -665,6 +672,7 @@ void changeEffect(Effect effect) {
   saveSettings();
 }
 
+/** Sends ir code and saves settings to change to wanted sound level */
 void changeSoundLevel(int8_t level) {
   int8_t diff = level - soundLevel;
   Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
@@ -677,15 +685,20 @@ void changeSoundLevel(int8_t level) {
   saveSettings();
 }
 
+/** 
+ * Returns the current effect for the current input
+ * (Each input has it's on effect independent of the other inputs)
+ */
 Effect currentEffect() {
   return currentEffectOnInput[currentInput];
 }
 
-// check and see if speaker system is still on
+/** Checks if speaker system is still on */
 void checkIfStillOn() {
   currentMode = digitalRead(ON_LED) ? Off : currentMode;
 }
 
+/** Returns the strings index in const char[] array*/ 
 uint8_t getStringIndex(String s, const char* array[], uint8_t len) {
   Tracef2("[getStringIndex] Length of array: %d\n", len);
   for(uint8_t i = 0; i < len; i++) {
@@ -693,10 +706,14 @@ uint8_t getStringIndex(String s, const char* array[], uint8_t len) {
   }
 }
 
+/** Sets the current input to the next input, but does not save or send 
+ *  anything */
 void setNextInput() {
   currentInput = currentInput >= 5 ? (Input)0 : (Input)(currentInput + 1);
 }
 
+/** Sets the current input to the next input, but does not save or send anything
+ *  anything */
 void setNextEffect() {
   currentEffect = currentEffect >= 2 ? (Effect)0 : (Effect)(currentEffect + 1);
 }
