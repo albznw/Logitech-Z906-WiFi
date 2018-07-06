@@ -78,18 +78,19 @@ decode_results results;  // Somewhere to store the results
 
 /********************************* Variables **********************************/
 
-byte soundLevel;
+int8_t soundLevel;
+bool mute;
 
-enum Input { AUX, Input1, Input2, Input3, Input4, Input5 };
+enum Input : byte { AUX, Input1, Input2, Input3, Input4, Input5 };
 const char* inputs[] { "AUX", "Input1", "Input2", "Input3", "Input4", "Input5" };
 Input currentInput;
 
-enum Effect { Surround, Music, Stereo };
+enum Effect : byte { Surround, Music, Stereo };
 const char* effects[] { "Surround", "Music", "Stereo" };
 Effect currentEffectOnInput[5];
 
-enum Mode : byte { Off, On };
-const char* modes[] = { "Off", "On" };
+enum Mode : byte { Off, On, Level };
+const char* modes[] = { "Off", "On", "Level" };
 Mode currentMode = Off;
 
 #define DEBUG false
@@ -140,18 +141,29 @@ void setup() {
 
 unsigned long current = micros();
 unsigned long last = micros();
+unsigned long levelTimeout;
+bool levelTimeoutOn = false;
 
 void loop() {
-  current = micros();
+  currentMicros = micros();
 
   checkIfStillOn();
   if(OTA_ON) ArduinoOTA.handle();
   server.handleClient();
   mqttclient.loop();
   handleIR();
+  handleTiming();
 
-  Serial.println(current-last);
-  last = current;
+  // We need to reset the mode after a while
+  if(currentInput == Level) {
+    levelTimeout = millis() + LEVEL_TIMEOUT;
+    levelTimeoutOn = true;
+  }
+  if(levelTimeoutOn && millis() - levelTimeout > 0) {
+    currentMode = On;
+  }
+  //Serial.println(currentMicros - lastMicros);
+  lastMicros = currentMicros;
 }
 
 void testShit() {
@@ -278,6 +290,8 @@ void setupIR() {
 
 void setupEEPROM() {
   EEPROM.begin(512);
+  mute = false; // Reset mute in memory
+  EEPROM.write(8, mute);
   loadSettings();
 }
 
@@ -392,6 +406,14 @@ String handleJSONReq(String req) {
   }
   // Setters
   else if(method == "setSettings") {
+    // Turn on the speakers if they're not yet on
+    if(currentMode != On) {
+      turnOn();
+      // If the speakers was Off or in Level mode we have to wait until
+      // it's in for sure is in On mode
+      delay(2000); // change dis later to more appropriate value
+    }
+
     bool somethingChanged = false;
 
     const char* input = reqjson["input"];
@@ -440,48 +462,66 @@ String handleJSONReq(String req) {
 }
 
 void handleIR() {
+  static int lastState;
   if (irrecv.decode(&results)) {
     const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
     DynamicJsonBuffer respBuffer(bufferSize);
     JsonObject& json = respBuffer.createObject();
     String resp = "";
     JsonObject& settings = json.createNestedObject("settings");
-    switch (results.value) {
+
+    state = results.value;
+    bool runStateMachine = true;
+
+    while(runStateMachine) {
+      switch (state) {
       case 0xFFFFFFFF:
         Traceln("[handleIR] Repeat.");
+        state = lastState;
         break;
       case 0x63C98B53:
         Traceln("[handleIR] Power button pressed.");
-        publishMQTT(StateTopic, "Power was pressed");
+        currentMode = currentMode == On ? Off : On;
         break;
       case 0xEFA4E63F:
         Traceln("[handleIR] Input button pressed.");
-        getSettings(json);
-        json.printTo(resp);
-        publishMQTT(StateTopic, resp);
+        setNextInput();
         break;
       case 0x92CA878C:
         Traceln("[handleIR] Mute button pressed.");
-        
-        settings["soundlevel"] = soundLevel;
-        json.printTo(resp);
-        publishMQTT(StateTopic, resp);
+        mute = !mute;
         break;
       case 0x58B863E3:
         Traceln("[handleIR] Level button pressed.");
+        currentMode = Level;
         break;
       case 0x11E728E:
         Traceln("[handleIR] Minus button pressed.");
+        soundLevel -= 2;
         break;
       case 0xABB1A8D2:
         Traceln("[handleIR] Plus button pressed.");
+        soundLevel += 2;
         break;
       case 0x48C7229F:
         Traceln("[handleIR] Effect button pressed.");
+        setNextEffect();
         break;
       default:
         Tracef2("No such ir code case: %X\n", results.value);
+        publishMQTT(DebugTopic, "No such ir code case: " + String(results.value));
+        return;
+      }
+      // Things that has to be done in all standard states
+      if(state != 0xFFFFFFFF) {
+        runStateMachine = false;
+        saveSettings();
+      }
     }
+    lastState = state;
+    getSettings(json);
+    json.printTo(resp);
+    publishMQTT(StateTopic, resp);
     irrecv.resume();
   }
 }
@@ -506,7 +546,10 @@ String getChipStatsJSON() {
 void getSettings(JsonObject &json) {
   JsonObject& settings = json.createNestedObject("settings");
   settings["mode"] = modes[currentMode];
-  settings["soundlevel"] = soundLevel;
+  if(mute)
+    settings["soundlevel"] = "mute";
+  else
+    settings["soundlevel"] = soundLevel;
   settings["input"] = inputs[currentInput];
   settings["effect"] = effects[currentEffect()];
 }
@@ -524,6 +567,8 @@ void loadSettings() {
     currentEffectOnInput[i] = (Effect)EEPROM.read(3 + i);
     currentEffectOnInput[i] = currentEffectOnInput[i] < 3 ? currentEffectOnInput[i] : Surround;
   }
+
+  mute = (bool)EEPROM.read(8);
 }
 
 void printSettings() {
@@ -535,14 +580,15 @@ void printSettings() {
 void saveSettings() {
   EEPROM.write(1, soundLevel);
   EEPROM.write(2, currentInput);
-  for(uint8_t i= 0; i < 5; i++) {
+  for(uint8_t i = 0; i < 5; i++) {
     EEPROM.write(3 + i, currentEffectOnInput[i]);
   }
+  EEPROM.write(8, mute);
   EEPROM.commit();
 }
 
 void turnOn() {
-  if(currentMode != On) {
+  if(currentMode == Off) {
     irsend.sendNEC(POWER_IR, 32);
     currentMode = On;
     saveSettings();
@@ -555,6 +601,24 @@ void turnOff() {
     currentMode = Off;
     saveSettings();
   }
+}
+
+void togglePower() {
+  irsend.sendNEC(POWER_IR, 32);
+  currentMode = currentMode == On ? Off : On;
+  saveSettings();
+}
+
+void toggleInput() {
+  irsend.sendNEC(INPUT_IR, 32);
+  setNextInput();
+  saveSettings();
+}
+
+void toggleMute() {
+  irsend.sendNEC(MUTE_IR);
+  mute = !mute;
+  saveSettings();
 }
 
 void changeInput(Input input) {
@@ -627,4 +691,12 @@ uint8_t getStringIndex(String s, const char* array[], uint8_t len) {
   for(uint8_t i = 0; i < len; i++) {
     if(s == array[i]) return i;
   }
-} 
+}
+
+void setNextInput() {
+  currentInput = currentInput >= 5 ? (Input)0 : (Input)(currentInput + 1);
+}
+
+void setNextEffect() {
+  currentEffect = currentEffect >= 2 ? (Effect)0 : (Effect)(currentEffect + 1);
+}
