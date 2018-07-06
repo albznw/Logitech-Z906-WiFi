@@ -93,6 +93,8 @@ enum Mode : byte { Off, On, Level };
 const char* modes[] = { "Off", "On", "Level" };
 Mode currentMode = Off;
 
+#define LEVEL_TIMEOUT 5000
+
 #define DEBUG false
 // conditional debugging
 #if DEBUG 
@@ -139,8 +141,8 @@ void setup() {
   Serial.println(WiFi.localIP());
 }
 
-unsigned long current = micros();
-unsigned long last = micros();
+unsigned long currentMicros = micros();
+unsigned long lastMicros = micros();
 unsigned long levelTimeout;
 bool levelTimeoutOn = false;
 
@@ -152,7 +154,6 @@ void loop() {
   server.handleClient();
   mqttclient.loop();
   handleIR();
-  handleTiming();
 
   // We need to reset the mode after a while
   if(currentInput == Level) {
@@ -474,7 +475,7 @@ void handleIR() {
     String resp = "";
     JsonObject& settings = json.createNestedObject("settings");
 
-    state = results.value;
+    int state = results.value;
     bool runStateMachine = true;
 
     while(runStateMachine) {
@@ -513,7 +514,7 @@ void handleIR() {
         break;
       default:
         Tracef2("No such ir code case: %X\n", results.value);
-        publishMQTT(DebugTopic, "No such ir code case: " + String(results.value));
+        publishMQTT(DebugTopic, "No such ir code case: " + results.value);
         return;
       }
       // Things that has to be done in all standard states
@@ -693,6 +694,10 @@ Effect currentEffect() {
   return currentEffectOnInput[currentInput];
 }
 
+void setCurrentEffect(Effect effect) {
+  currentEffectOnInput[currentInput] = effect;
+}
+
 /** Checks if speaker system is still on */
 void checkIfStillOn() {
   currentMode = digitalRead(ON_LED) ? Off : currentMode;
@@ -715,5 +720,6 @@ void setNextInput() {
 /** Sets the current input to the next input, but does not save or send anything
  *  anything */
 void setNextEffect() {
-  currentEffect = currentEffect >= 2 ? (Effect)0 : (Effect)(currentEffect + 1);
+  Effect effect = currentEffect() >= 2 ? (Effect)0 : (Effect)(currentEffect() + 1);
+  setCurrentEffect(effect);
 }
