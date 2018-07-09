@@ -92,6 +92,7 @@ Effect currentEffectOnInput[5];
 enum Mode : byte { Off, On, Level };
 const char* modes[] = { "Off", "On", "Level" };
 Mode currentMode = Off;
+Mode lastMode = Off;
 
 #define LEVEL_TIMEOUT 5000
 
@@ -144,26 +145,36 @@ void setup() {
 unsigned long currentMicros = micros();
 unsigned long lastMicros = micros();
 unsigned long levelTimeout;
-bool levelTimeoutOn = false;
-
+int stat = HIGH;
 void loop() {
   currentMicros = micros();
 
-  checkIfStillOn();
+  //checkIfStillOn();
   if(OTA_ON) ArduinoOTA.handle();
   server.handleClient();
   mqttclient.loop();
   handleIR();
 
   // We need to reset the mode after a while
-  if(currentInput == Level) {
-    levelTimeout = millis() + LEVEL_TIMEOUT;
-    levelTimeoutOn = true;
-  }
-  if(levelTimeoutOn && millis() - levelTimeout > 0) {
-    currentMode = On;
+  //Serial.printf("\rCurrentMode: %s", modes[currentMode]);
+  if(currentMode == Level) {
+    if(lastMode != Level) {
+      levelTimeout = millis() + LEVEL_TIMEOUT;
+    } else if(millis() > levelTimeout) {
+      currentMode = On;
+      saveSettings();
+      const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
+      DynamicJsonBuffer respBuffer(bufferSize);
+      JsonObject& json = respBuffer.createObject();
+      String resp = "";
+      getSettings(json);
+      json.printTo(resp);
+      Traceln("[Loop] Ending level mode..");
+      publishMQTT(StateTopic, resp);
+    }
   }
   //Serial.println(currentMicros - lastMicros);
+  lastMode = currentMode;
   lastMicros = currentMicros;
 }
 
@@ -469,56 +480,59 @@ void handleIR() {
     DynamicJsonBuffer respBuffer(bufferSize);
     JsonObject& json = respBuffer.createObject();
     String resp = "";
-    JsonObject& settings = json.createNestedObject("settings");
 
     int state = results.value;
     bool runStateMachine = true;
 
-    if(state == 0xFFFFFFFF) {
+    if(state == 0xFFFFFFFF &&
+      (lastState == 0x11E728E || lastState == 0xABB1A8D2)) {
       Traceln("[handleIR] Repeat.");
       state = lastState;
     }
 
     switch (state) {
-    case 0x63C98B53:
-      Traceln("[handleIR] Power button pressed.");
-      currentMode = currentMode == On ? Off : On;
-      break;
-    case 0xEFA4E63F:
-      Traceln("[handleIR] Input button pressed.");
-      setNextInput();
-      break;
-    case 0x92CA878C:
-      Traceln("[handleIR] Mute button pressed.");
-      mute = !mute;
-      break;
-    case 0x58B863E3:
-      Traceln("[handleIR] Level button pressed.");
-      currentMode = Level;
-      break;
-    case 0x11E728E:
-      Traceln("[handleIR] Minus button pressed.");
-      soundLevel -= 2;
-      break;
-    case 0xABB1A8D2:
-      Traceln("[handleIR] Plus button pressed.");
-      soundLevel += 2;
-      break;
-    case 0x48C7229F:
-      Traceln("[handleIR] Effect button pressed.");
-      setNextEffect();
-      break;
-    default:
-      Tracef2("No such ir code case: %X\n", results.value);
-      publishMQTT(DebugTopic, "No such ir code case: " + results.value);
-      return;
+      case 0xFFFFFFFF:
+        Traceln("[handleIR] Not repeatable.");
+        break;
+      case 0x63C98B53:
+        Traceln("[handleIR] Power button pressed.");
+        currentMode = currentMode == On ? Off : On;
+        break;
+      case 0xEFA4E63F:
+        Traceln("[handleIR] Input button pressed.");
+        setNextInput();
+        break;
+      case 0x92CA878C:
+        Traceln("[handleIR] Mute button pressed.");
+        mute = !mute;
+        break;
+      case 0x58B863E3:
+        Traceln("[handleIR] Level button pressed.");
+        currentMode = Level;
+        break;
+      case 0x11E728E:
+        Traceln("[handleIR] Minus button pressed.");
+        soundLevel -= soundLevel < 2 ? 0 : 2;
+        break;
+      case 0xABB1A8D2:
+        Traceln("[handleIR] Plus button pressed.");
+        soundLevel += soundLevel >= 100 ? 0 : 2;
+        break;
+      case 0x48C7229F:
+        Traceln("[handleIR] Effect button pressed.");
+        setNextEffect();
+        break;
+      default:
+        Tracef2("No such ir code case: %X\n", results.value);
+        irrecv.resume();
+        return;
     }
     // Things that has to be done in all standard states
     if(state != 0xFFFFFFFF) {
       runStateMachine = false;
       saveSettings();
+      lastState = state;
     }
-    lastState = state;
     getSettings(json);
     json.printTo(resp);
     publishMQTT(StateTopic, resp);
@@ -670,6 +684,8 @@ void changeEffect(Effect effect) {
 
 /** Sends ir code and saves settings to change to wanted sound level */
 void changeSoundLevel(int8_t level) {
+  if(level < 0)
+    level = 0;
   int8_t diff = level - soundLevel;
   Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
   if(diff > 1) {
