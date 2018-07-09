@@ -95,7 +95,7 @@ Mode currentMode = Off;
 
 #define LEVEL_TIMEOUT 5000
 
-#define DEBUG false
+#define DEBUG true
 // conditional debugging
 #if DEBUG 
 
@@ -466,8 +466,8 @@ String handleJSONReq(String req) {
   return response;
 }
 
+int lastState = 0;
 void handleIR() {
-  static int lastState;
   if (irrecv.decode(&results)) {
     const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
     DynamicJsonBuffer respBuffer(bufferSize);
@@ -478,50 +478,49 @@ void handleIR() {
     int state = results.value;
     bool runStateMachine = true;
 
-    while(runStateMachine) {
-      switch (state) {
-      case 0xFFFFFFFF:
-        Traceln("[handleIR] Repeat.");
-        state = lastState;
-        break;
-      case 0x63C98B53:
-        Traceln("[handleIR] Power button pressed.");
-        currentMode = currentMode == On ? Off : On;
-        break;
-      case 0xEFA4E63F:
-        Traceln("[handleIR] Input button pressed.");
-        setNextInput();
-        break;
-      case 0x92CA878C:
-        Traceln("[handleIR] Mute button pressed.");
-        mute = !mute;
-        break;
-      case 0x58B863E3:
-        Traceln("[handleIR] Level button pressed.");
-        currentMode = Level;
-        break;
-      case 0x11E728E:
-        Traceln("[handleIR] Minus button pressed.");
-        soundLevel -= 2;
-        break;
-      case 0xABB1A8D2:
-        Traceln("[handleIR] Plus button pressed.");
-        soundLevel += 2;
-        break;
-      case 0x48C7229F:
-        Traceln("[handleIR] Effect button pressed.");
-        setNextEffect();
-        break;
-      default:
-        Tracef2("No such ir code case: %X\n", results.value);
-        publishMQTT(DebugTopic, "No such ir code case: " + results.value);
-        return;
-      }
-      // Things that has to be done in all standard states
-      if(state != 0xFFFFFFFF) {
-        runStateMachine = false;
-        saveSettings();
-      }
+    if(state == 0xFFFFFFFF) {
+      Traceln("[handleIR] Repeat.");
+      state = lastState;
+    }
+
+    switch (state) {
+    case 0x63C98B53:
+      Traceln("[handleIR] Power button pressed.");
+      currentMode = currentMode == On ? Off : On;
+      break;
+    case 0xEFA4E63F:
+      Traceln("[handleIR] Input button pressed.");
+      setNextInput();
+      break;
+    case 0x92CA878C:
+      Traceln("[handleIR] Mute button pressed.");
+      mute = !mute;
+      break;
+    case 0x58B863E3:
+      Traceln("[handleIR] Level button pressed.");
+      currentMode = Level;
+      break;
+    case 0x11E728E:
+      Traceln("[handleIR] Minus button pressed.");
+      soundLevel -= 2;
+      break;
+    case 0xABB1A8D2:
+      Traceln("[handleIR] Plus button pressed.");
+      soundLevel += 2;
+      break;
+    case 0x48C7229F:
+      Traceln("[handleIR] Effect button pressed.");
+      setNextEffect();
+      break;
+    default:
+      Tracef2("No such ir code case: %X\n", results.value);
+      publishMQTT(DebugTopic, "No such ir code case: " + results.value);
+      return;
+    }
+    // Things that has to be done in all standard states
+    if(state != 0xFFFFFFFF) {
+      runStateMachine = false;
+      saveSettings();
     }
     lastState = state;
     getSettings(json);
