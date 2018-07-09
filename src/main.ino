@@ -64,6 +64,7 @@ bool OTA_ON = false; // Turn on OTA
 const char* willMessage = "clientId has disconnected...";
 
 #define FirstMessage        "I communicate via JSON!"
+#define MQTT_MAX_PACKET_SIZE 192 //Remember to set this i platformio.ini
 
 WiFiClient wificlient;  // is needed for the mqtt client
 PubSubClient mqttclient;
@@ -78,7 +79,8 @@ decode_results results;  // Somewhere to store the results
 
 /********************************* Variables **********************************/
 
-int8_t soundLevel;
+int8_t soundLevel[4]; // [Volume, Bass, Rear, Center]
+
 bool mute;
 
 enum Input : byte { AUX, Input1, Input2, Input3, Input4, Input5 };
@@ -89,12 +91,14 @@ enum Effect : byte { Surround, Music, Stereo };
 const char* effects[] { "Surround", "Music", "Stereo" };
 Effect currentEffectOnInput[5];
 
-enum Mode : byte { Off, On, Level };
-const char* modes[] = { "Off", "On", "Level" };
+// In mode On we'll change the soundlevel (defult)
+enum Mode : byte { Off, On, BassLevel, RearLevel, CenterLevel};
+const char* modes[] = { "Off", "On", "Bass level", "Rear level", "Center level" };
 Mode currentMode = Off;
 Mode lastMode = Off;
 
 #define LEVEL_TIMEOUT 5000
+unsigned long levelTimeout;
 
 #define DEBUG true
 // conditional debugging
@@ -142,28 +146,21 @@ void setup() {
   Serial.println(WiFi.localIP());
 }
 
-unsigned long currentMicros = micros();
-unsigned long lastMicros = micros();
-unsigned long levelTimeout;
-int stat = HIGH;
 void loop() {
-  currentMicros = micros();
-
   //checkIfStillOn();
   if(OTA_ON) ArduinoOTA.handle();
   server.handleClient();
   mqttclient.loop();
   handleIR();
 
-  // We need to reset the mode after a while
-  //Serial.printf("\rCurrentMode: %s", modes[currentMode]);
-  if(currentMode == Level) {
-    if(lastMode != Level) {
+  // We need to go back to On-mode after a while
+  if(currentMode >= BassLevel) {
+    if(currentMode != lastMode) {
       levelTimeout = millis() + LEVEL_TIMEOUT;
     } else if(millis() > levelTimeout) {
       currentMode = On;
       saveSettings();
-      const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
+      const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(7);
       DynamicJsonBuffer respBuffer(bufferSize);
       JsonObject& json = respBuffer.createObject();
       String resp = "";
@@ -173,9 +170,7 @@ void loop() {
       publishMQTT(StateTopic, resp);
     }
   }
-  //Serial.println(currentMicros - lastMicros);
   lastMode = currentMode;
-  lastMicros = currentMicros;
 }
 
 void testShit() {
@@ -333,6 +328,7 @@ bool connectMQTT() {
 }
 
 bool publishMQTT(const char* topic, const char* payload){
+  Serial.printf("Packet size: %u\n", sizeof(payload) + sizeof(topic));
   String printString = "";
   bool returnBool = false;
   if(mqttclient.publish(topic, payload)) {
@@ -348,6 +344,7 @@ bool publishMQTT(const char* topic, const char* payload){
 }
 
 bool publishMQTT(const char* topic, String payload){
+  Serial.printf("Packet size: %u\n", sizeof(payload)+ sizeof(topic));
   return publishMQTT(topic, payload.c_str());
 }
 
@@ -385,7 +382,7 @@ String handleJSONReq(String req) {
   reqjson.prettyPrintTo(Serial);
   Tracef("\n");
 
-  const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
+  const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(7);
   DynamicJsonBuffer respBuffer(bufferSize);
   JsonObject& json = respBuffer.createObject();
 
@@ -454,7 +451,7 @@ String handleJSONReq(String req) {
       json["message"] = "You didn't specify input, effect or soundlevel";
     }
   } else if(method = "reset") {
-    soundLevel = 0;
+    soundLevel[0] = 0;
     currentInput = Input1;
     for(uint8_t i= 0; i < 5; i++) {
       currentEffectOnInput[i] = Surround;
@@ -476,7 +473,7 @@ String handleJSONReq(String req) {
 int lastState = 0;
 void handleIR() {
   if (irrecv.decode(&results)) {
-    const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(4);
+    const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(7);
     DynamicJsonBuffer respBuffer(bufferSize);
     JsonObject& json = respBuffer.createObject();
     String resp = "";
@@ -508,15 +505,15 @@ void handleIR() {
         break;
       case 0x58B863E3:
         Traceln("[handleIR] Level button pressed.");
-        currentMode = Level;
+        nextLevelOnCurrentEffect();
         break;
       case 0x11E728E:
         Traceln("[handleIR] Minus button pressed.");
-        soundLevel -= soundLevel < 2 ? 0 : 2;
+        soundLevel[currentLevel()] -= soundLevel[currentLevel()] < 2 ? 0 : 1;
         break;
       case 0xABB1A8D2:
         Traceln("[handleIR] Plus button pressed.");
-        soundLevel += soundLevel >= 100 ? 0 : 2;
+        soundLevel[currentLevel()] += soundLevel[currentLevel()] >= 100 ? 0 : 2;
         break;
       case 0x48C7229F:
         Traceln("[handleIR] Effect button pressed.");
@@ -563,42 +560,53 @@ void getSettings(JsonObject &json) {
   settings["mode"] = modes[currentMode];
   if(mute)
     settings["soundlevel"] = "mute";
-  else
-    settings["soundlevel"] = soundLevel;
+  else {
+    settings["soundlevel"] = soundLevel[0];
+    settings["basslevel"] = soundLevel[1];
+    settings["rearlevel"] = soundLevel[2];
+    settings["centerlevel"] = soundLevel[3];
+  }
   settings["input"] = inputs[currentInput];
   settings["effect"] = effects[currentEffect()];
 }
 
 void loadSettings() {
-  soundLevel = EEPROM.read(1);
-  if(soundLevel > 128 || soundLevel < 0) {
-    soundLevel = 0;
+  for(int8_t i = 0; i < 4; i++) {
+    soundLevel[0] = EEPROM.read(1 + i);
+    if(soundLevel[i] > 128 || soundLevel[i] < 0) {
+      soundLevel[i] = 0;
+    }
   }
 
-  currentInput = (Input)EEPROM.read(2);
+  currentInput = (Input)EEPROM.read(5);
   currentInput = currentInput < 6 ? currentInput : AUX;
 
   for(uint8_t i= 0; i < 5; i++) {
-    currentEffectOnInput[i] = (Effect)EEPROM.read(3 + i);
+    currentEffectOnInput[i] = (Effect)EEPROM.read(6 + i);
     currentEffectOnInput[i] = currentEffectOnInput[i] < 3 ? currentEffectOnInput[i] : Surround;
   }
 
-  mute = (bool)EEPROM.read(8);
+  mute = (bool)EEPROM.read(11);
 }
 
 void printSettings() {
   Serial.printf("\nInput: %s\n", inputs[currentInput]);
-  Serial.printf("Soundlevel: %d\n", soundLevel);
+  Serial.printf("Soundlevel: %d\t", soundLevel[0]);
+  Serial.printf("Bass: %d\t", soundLevel[1]);
+  Serial.printf("Rear: %d\n", soundLevel[2]);
+  Serial.printf("Center: %d\n", soundLevel[3]);
   Serial.printf("Effect: %s\n\n", effects[currentEffect()]);
 }
 
 void saveSettings() {
-  EEPROM.write(1, soundLevel);
-  EEPROM.write(2, currentInput);
-  for(uint8_t i = 0; i < 5; i++) {
-    EEPROM.write(3 + i, currentEffectOnInput[i]);
+  for(uint8_t i = 0; i < 4; i++) {
+    EEPROM.write(1 + i, soundLevel[i]);
   }
-  EEPROM.write(8, mute);
+  EEPROM.write(5, currentInput);
+  for(uint8_t i = 0; i < 5; i++) {
+    EEPROM.write(6 + i, currentEffectOnInput[i]);
+  }
+  EEPROM.write(11, mute);
   EEPROM.commit();
 }
 
@@ -686,15 +694,20 @@ void changeEffect(Effect effect) {
 void changeSoundLevel(int8_t level) {
   if(level < 0)
     level = 0;
-  int8_t diff = level - soundLevel;
+  int8_t diff = level - soundLevel[currentLevel()];
   Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
   if(diff > 1) {
     irsend.sendNEC(PLUS_IR, 32, diff);
   } else if(diff < 0) {
     irsend.sendNEC(MINUS_IR, 32, -diff);
   }
-  soundLevel = level;
+  soundLevel[currentLevel()] = level;
   saveSettings();
+}
+
+/** Returns the soundlevel that the receiver is currently on */
+uint8_t currentLevel() {
+  return currentMode - 1;
 }
 
 /** 
@@ -733,4 +746,20 @@ void setNextInput() {
 void setNextEffect() {
   Effect effect = currentEffect() >= 2 ? (Effect)0 : (Effect)(currentEffect() + 1);
   setCurrentEffect(effect);
+}
+
+void nextLevelOnCurrentEffect() {
+  int limit = 4;
+  switch(currentEffect()) {
+    case Surround:
+      limit = 4;
+      break;
+    case Music:
+      limit = 3;
+      break;
+    case Stereo:
+      limit = 2;
+      break;
+  }
+  currentMode = currentMode >= limit ? (Mode)1 : (Mode)(currentMode + 1);
 }
