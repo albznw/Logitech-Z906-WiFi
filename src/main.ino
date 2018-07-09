@@ -359,12 +359,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Traceln("[MQTT][callback] Callback update.");
   Traceln(String("[MQTT][callback] Topic: " + topicStr));
 
-  if(topicStr.equals(CommandTopic)) {
+  if(topicStr.equals(CommandTopic))
     publishMQTT(StateTopic, handleJSONReq(payloadStr));
-  } else {
-    publishMQTT(DebugTopic, String("[MQTT][callback] No such MQTT topic \""\
-     + topicStr +"\""));
-  }
 }
 
 /** For handling requests, both the MQTT and REST requests are parsed here
