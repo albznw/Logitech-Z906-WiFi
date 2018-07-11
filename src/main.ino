@@ -84,7 +84,7 @@ int8_t soundLevel[4]; // [Volume, Bass, Rear, Center]
 bool mute;
 
 enum Input : byte { AUX, Input1, Input2, Input3, Input4, Input5 };
-const char* inputs[] { "AUX", "Input1", "Input2", "Input3", "Input4", "Input5" };
+const char* inputs[] { "AUX", "Input 1", "Input 2", "Input 3", "Input 4", "Input 5" };
 Input currentInput;
 
 enum Effect : byte { Surround, Music, Stereo };
@@ -99,6 +99,21 @@ Mode lastMode = Off;
 
 #define LEVEL_TIMEOUT 5000
 unsigned long levelTimeout;
+
+#define SOUND_LEVEL_ADDR        1
+#define BASS_LEVEL_ADDR         2
+#define REAR_LEVEL_ADDR         3
+#define CENTER_LEVEL_ADDR       4
+#define CURRENT_INPUT_ADDR      5
+#define EFFECT_ON_AUX           6
+#define EFFECT_ON_INPUT1        7
+#define EFFECT_ON_INPUT2        8
+#define EFFECT_ON_INPUT3        9
+#define EFFECT_ON_INPUT4        10
+#define EFFECT_ON_INPUT5        11
+#define MUTE_ADDR               12
+
+
 
 #define DEBUG true
 // conditional debugging
@@ -131,16 +146,13 @@ unsigned long levelTimeout;
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
-
   setupWifiManager();
   setupOTA();
+  setupEEPROM();
+  printSettings();
   setupWebServer();
   setupMQTT();
   setupIR();
-
-  setupEEPROM();
-  printSettings();
-
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
@@ -298,7 +310,8 @@ void setupIR() {
 void setupEEPROM() {
   EEPROM.begin(512);
   mute = false; // Reset mute in memory
-  EEPROM.write(8, mute);
+  EEPROM.write(MUTE_ADDR, mute);
+  EEPROM.commit();
   loadSettings();
 }
 
@@ -328,7 +341,6 @@ bool connectMQTT() {
 }
 
 bool publishMQTT(const char* topic, const char* payload){
-  Serial.printf("Packet size: %u\n", sizeof(payload) + sizeof(topic));
   String printString = "";
   bool returnBool = false;
   if(mqttclient.publish(topic, payload)) {
@@ -344,7 +356,6 @@ bool publishMQTT(const char* topic, const char* payload){
 }
 
 bool publishMQTT(const char* topic, String payload){
-  Serial.printf("Packet size: %u\n", sizeof(payload)+ sizeof(topic));
   return publishMQTT(topic, payload.c_str());
 }
 
@@ -527,9 +538,9 @@ void handleIR() {
     // Things that has to be done in all standard states
     if(state != 0xFFFFFFFF) {
       runStateMachine = false;
-      saveSettings();
       lastState = state;
     }
+    saveSettings();
     getSettings(json);
     json.printTo(resp);
     publishMQTT(StateTopic, resp);
@@ -572,21 +583,21 @@ void getSettings(JsonObject &json) {
 
 void loadSettings() {
   for(int8_t i = 0; i < 4; i++) {
-    soundLevel[0] = EEPROM.read(1 + i);
+    soundLevel[i] = EEPROM.read(SOUND_LEVEL_ADDR + i);
     if(soundLevel[i] > 128 || soundLevel[i] < 0) {
       soundLevel[i] = 0;
     }
   }
 
-  currentInput = (Input)EEPROM.read(5);
+  currentInput = (Input)EEPROM.read(CURRENT_INPUT_ADDR);
   currentInput = currentInput < 6 ? currentInput : AUX;
 
-  for(uint8_t i= 0; i < 5; i++) {
-    currentEffectOnInput[i] = (Effect)EEPROM.read(6 + i);
+  for(uint8_t i= 0; i < 6; i++) {
+    currentEffectOnInput[i] = (Effect)EEPROM.read(EFFECT_ON_AUX + i);
     currentEffectOnInput[i] = currentEffectOnInput[i] < 3 ? currentEffectOnInput[i] : Surround;
   }
 
-  mute = (bool)EEPROM.read(11);
+  mute = (bool)EEPROM.read(MUTE_ADDR);
 }
 
 void printSettings() {
@@ -600,19 +611,22 @@ void printSettings() {
 
 void saveSettings() {
   for(uint8_t i = 0; i < 4; i++) {
-    EEPROM.write(1 + i, soundLevel[i]);
+    EEPROM.write(SOUND_LEVEL_ADDR + i, soundLevel[i]);
   }
-  EEPROM.write(5, currentInput);
-  for(uint8_t i = 0; i < 5; i++) {
-    EEPROM.write(6 + i, currentEffectOnInput[i]);
+  EEPROM.write(CURRENT_INPUT_ADDR, currentInput);
+  for(uint8_t i = 0; i < 6; i++) {
+    EEPROM.write(EFFECT_ON_AUX + i, currentEffectOnInput[i]);
   }
-  EEPROM.write(11, mute);
-  EEPROM.commit();
+  EEPROM.write(MUTE_ADDR, mute);
+  if(EEPROM.commit())
+    Traceln("Successfully saved to EEPROM");
+  else
+    Traceln("Failed to save to EEPROM");
 }
 
 void turnOn() {
   if(currentMode == Off) {
-    irsend.sendNEC(POWER_IR, 32);
+    sendIR(POWER_IR);
     currentMode = On;
     saveSettings();
   }
@@ -620,26 +634,26 @@ void turnOn() {
 
 void turnOff() {
   if(currentMode != Off) {
-    irsend.sendNEC(POWER_IR, 32);
+    sendIR(POWER_IR);
     currentMode = Off;
     saveSettings();
   }
 }
 
 void togglePower() {
-  irsend.sendNEC(POWER_IR, 32);
+  sendIR(POWER_IR);
   currentMode = currentMode == On ? Off : On;
   saveSettings();
 }
 
 void toggleInput() {
-  irsend.sendNEC(INPUT_IR, 32);
+  sendIR(INPUT_IR);
   setNextInput();
   saveSettings();
 }
 
 void toggleMute() {
-  irsend.sendNEC(MUTE_IR);
+  sendIR(MUTE_IR);
   mute = !mute;
   saveSettings();
 }
@@ -649,22 +663,22 @@ void changeInput(Input input) {
   Tracef2("[changeInput] Changing input to: %s", inputs[input]);
   switch(input) {
     case AUX:
-      irsend.sendNEC(AUX_IR, 32);
+      sendIR(AUX_IR);
       break;
     case Input1:
-      irsend.sendNEC(INPUT1_IR, 32);
+      sendIR(INPUT1_IR);
       break;
     case Input2:
-      irsend.sendNEC(INPUT2_IR, 32);
+      sendIR(INPUT2_IR);
       break;
     case Input3:
-      irsend.sendNEC(INPUT3_IR, 32);
+      sendIR(INPUT3_IR);
       break;
     case Input4:
-      irsend.sendNEC(INPUT4_IR, 32);
+      sendIR(INPUT4_IR);
       break;
     case Input5:
-      irsend.sendNEC(INPUT5_IR, 32);
+      sendIR(INPUT5_IR);
       break;
     default:
       Traceln("\tNo such input!");
@@ -682,7 +696,7 @@ void changeEffect(Effect effect) {
   Tracef3("[changeEffect] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
 
   for(uint8_t i = 0; i < ir_send_times; i++) {
-    irsend.sendNEC(EFFECT_IR);
+    sendIR(EFFECT_IR);
     delay(MS_BETWEEN_SENDING_IR);
   }
 
@@ -697,9 +711,9 @@ void changeSoundLevel(int8_t level) {
   int8_t diff = level - soundLevel[currentLevel()];
   Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
   if(diff > 1) {
-    irsend.sendNEC(PLUS_IR, 32, diff);
+    sendIR(PLUS_IR, diff);
   } else if(diff < 0) {
-    irsend.sendNEC(MINUS_IR, 32, -diff);
+    sendIR(MINUS_IR, diff);
   }
   soundLevel[currentLevel()] = level;
   saveSettings();
@@ -762,4 +776,18 @@ void nextLevelOnCurrentEffect() {
       break;
   }
   currentMode = currentMode >= limit ? (Mode)1 : (Mode)(currentMode + 1);
+}
+
+void sendIR(uint64_t data, uint16_t repeat) {
+  irrecv.disableIRIn();
+  irsend.sendNEC(data, 32, repeat);
+  irrecv.enableIRIn();
+  irrecv.resume();
+}
+
+void sendIR(uint64_t data) {
+  irrecv.disableIRIn();
+  irsend.sendNEC(data, 32);
+  irrecv.enableIRIn();
+  irrecv.resume();
 }
