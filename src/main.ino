@@ -45,7 +45,7 @@
 #define MS_BETWEEN_SENDING_IR 10    // Amount of ms to leap between sending commands in a row
 #include "LogitechIRCodes.h"
 
-bool OTA_ON = false; // Turn on OTA
+bool OTA_ON = true; // Turn on OTA
 
 /****************************** MQTT - Settings *******************************/
 // Connection things is found in Secret.h
@@ -61,7 +61,7 @@ bool OTA_ON = false; // Turn on OTA
 #define WillTopic           ClientRoot "/will"
 #define WillQoS             0
 #define WillRetain          false
-const char* willMessage = "clientId has disconnected...";
+const char* willMessage = MQTTClientId " has disconnected...";
 
 #define FirstMessage        "I communicate via JSON!"
 #define MQTT_MAX_PACKET_SIZE 192 //Remember to set this i platformio.ini
