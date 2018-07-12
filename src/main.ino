@@ -100,6 +100,7 @@ Mode lastMode = Off;
 #define LEVEL_TIMEOUT 5000
 unsigned long levelTimeout;
 
+/* EEPROM Addresses */
 #define SOUND_LEVEL_ADDR        1
 #define BASS_LEVEL_ADDR         2
 #define REAR_LEVEL_ADDR         3
@@ -450,6 +451,13 @@ String handleJSONReq(String req) {
       somethingChanged = true;
     }
 
+    const char* modeStr = reqjson["mode"];
+    if(modeStr) {
+      Traceln("[setSettings] Mode setting detected");
+      changeMode((Mode)getStringIndex(modeStr, modes, ARRAY_SIZE(modes)));
+      somethingChanged = true;
+    }
+
     int soundlevel = reqjson["soundlevel"];
     if(soundlevel) {
       Traceln("[setSettings] Soundlevel setting detected");
@@ -709,13 +717,29 @@ void changeSoundLevel(int8_t level) {
   if(level < 0)
     level = 0;
   int8_t diff = level - soundLevel[currentLevel()];
-  Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel, level, diff);
+  Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel[currentLevel()], level, diff);
   if(diff > 1) {
     sendIR(PLUS_IR, diff);
   } else if(diff < 0) {
     sendIR(MINUS_IR, diff);
   }
   soundLevel[currentLevel()] = level;
+  saveSettings();
+}
+
+/** Sends ir code and saves settings to change to wanted mode (Level) */
+void changeMode(Mode mode) {
+  Tracef3("[changeMode] Changing mode from: %s to: %s\n", modes[currentMode], modes[mode]);
+  int8_t diff = (mode - 1) - (currentMode - 1);
+  int8_t ir_send_times = (diff >= 0) ? diff : (abs(diff) + 1) % 4;
+  Tracef3("[changeMode] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
+
+  for(uint8_t i = 0; i < ir_send_times; i++) {
+    sendIR(LEVEL_IR);
+    delay(MS_BETWEEN_SENDING_IR);
+  }
+
+  currentMode = mode;
   saveSettings();
 }
 
