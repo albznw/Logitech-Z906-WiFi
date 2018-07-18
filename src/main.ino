@@ -30,7 +30,7 @@
 #include <IRutils.h>
 #include <EEPROM.h>
 #include <PubSubClient.h>
-
+#include <TaskScheduler.h>
 
 #include "Secret.h"
 #define ARRAY_SIZE(A) (sizeof(A) / sizeof((A)[0]))
@@ -39,7 +39,8 @@
 #define OTA_HOSTNAME                "Logitech-Z906" // Leave empty for esp8266-[ChipID]
 #define WIFI_MANAGER_STATION_NAME   "Logitech-Z906" // Leave empty for auto generated name ESP + ChipID
 
-#define ON_LED                D6    // The pin that is connected to the on-led on speaker system
+#define STATUS_LED            D7    // Status led pin
+#define ON_LED                D0    // The pin that is connected to the on-led on speaker system
 #define IR_LED                D2    // The IR LED pin
 #define RECV_IR               D1    // The ir reciever pin
 #define MS_BETWEEN_SENDING_IR 10    // Amount of ms to leap between sending commands in a row
@@ -114,7 +115,12 @@ unsigned long levelTimeout;
 #define EFFECT_ON_INPUT5        11
 #define MUTE_ADDR               12
 
-
+/*********************************** Tasks ************************************/
+Scheduler taskManager;
+Task tCheckIfStillOn(TASK_SECOND, TASK_FOREVER, &checkIfStillOn, &taskManager);
+Task tWifiStatus(TASK_SECOND, TASK_FOREVER, &checkWifiStatusCallback, &taskManager);
+Task tBlink(200, 3, &blinkStatusLedCallback, &taskManager, false, NULL, &blinkStatusLedDisabledCallback);
+Task tSendStatesMQTT(TASK_MINUTE, TASK_FOREVER, &sendStatesMQTT, &taskManager);
 
 #define DEBUG true
 // conditional debugging
@@ -147,6 +153,14 @@ unsigned long levelTimeout;
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
+  printChipStatus();
+
+  pinMode(ON_LED, INPUT);
+  pinMode(STATUS_LED, OUTPUT);
+
+  tWifiStatus.enable();
+  taskManager.execute();
+
   setupWifiManager();
   setupOTA();
   setupEEPROM();
@@ -154,14 +168,23 @@ void setup() {
   setupWebServer();
   setupMQTT();
   setupIR();
+
+  tCheckIfStillOn.enable();
+  tSendStatesMQTT.enable();
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 }
 
 void loop() {
-  //checkIfStillOn();
-  if(OTA_ON) ArduinoOTA.handle();
+  taskManager.execute();
+
+  if(OTA_ON) {
+    noInterrupts();
+    ArduinoOTA.handle();
+    interrupts();
+  }
+
   server.handleClient();
   mqttclient.loop();
   handleIR();
@@ -318,7 +341,7 @@ void setupEEPROM() {
 
 /** Be sure to setup WIFI before running this method! */
 void setupMQTT() {
-  mqttclient = PubSubClient(Broker, Port, callback, wificlient);
+  mqttclient = PubSubClient(Broker, Port, mqttCallback, wificlient);
   connectMQTT();
 }
 
@@ -370,7 +393,7 @@ String payloadToString(byte* payload, unsigned int length) {
   return String(message_buff);
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   //convert topic to string to make it easier to work with
   String topicStr = topic;
@@ -381,6 +404,22 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
   if(topicStr.equals(CommandTopic))
     publishMQTT(StateTopic, handleJSONReq(payloadStr));
+}
+
+void checkWifiStatusCallback() {
+  if(WiFi.getMode() != 1) {
+    Serial.println("[checkWifiStatusCallback] Not connected to WiFi...");
+    blinkStatusLed(TASK_FOREVER, 500);
+    tWifiStatus.setCallback(&WiFiDisconnectedCallback);
+  }
+}
+
+void WiFiDisconnectedCallback() {
+  if(WiFi.getMode() == 1) {
+    Serial.println("[WiFiDisconnectedCallback] Connected to WiFi!");
+    tBlink.disable();
+    tWifiStatus.setCallback(&checkWifiStatusCallback);
+  }
 }
 
 /** For handling requests, both the MQTT and REST requests are parsed here
@@ -574,6 +613,27 @@ String getChipStatsJSON() {
   return resp;
 }
 
+/** Prints chip status to serial */
+void printChipStatus() {
+  uint32_t realSize = ESP.getFlashChipRealSize();
+  uint32_t ideSize = ESP.getFlashChipSize();
+  FlashMode_t ideMode = ESP.getFlashChipMode();
+
+  Serial.printf("Flash real   id: %08X\n", ESP.getFlashChipId());
+  Serial.printf("Flash real size: %u bytes\n\n", realSize);
+  Serial.printf("Flash ide  size: %u bytes\n", ideSize);
+  Serial.printf("Flash ide speed: %u Hz\n", ESP.getFlashChipSpeed());
+  Serial.printf("Flash ide  mode: %s\n\n", (ideMode == FM_QIO ? "QIO" : ideMode == FM_QOUT ? "QOUT" : ideMode == FM_DIO ? "DIO" : ideMode == FM_DOUT ? "DOUT" : "UNKNOWN"));
+  Serial.printf("Sketch size:\t\t%u bytes\n", ESP.getSketchSize());
+  Serial.printf("Free sketch space:\t%u bytes\n", ESP.getFreeSketchSpace());
+
+  if (ideSize != realSize) {
+    Serial.println("Flash Chip configuration wrong!\n");
+  } else {
+    Serial.println("Flash Chip configuration ok.\n");
+  }
+}
+
 void getSettings(JsonObject &json) {
   JsonObject& settings = json.createNestedObject("settings");
   settings["mode"] = modes[currentMode];
@@ -721,7 +781,7 @@ void changeSoundLevel(int8_t level) {
   if(diff > 1) {
     sendIR(PLUS_IR, diff);
   } else if(diff < 0) {
-    sendIR(MINUS_IR, diff);
+    sendIR(MINUS_IR, -diff);
   }
   soundLevel[currentLevel()] = level;
   saveSettings();
@@ -814,4 +874,37 @@ void sendIR(uint64_t data) {
   irsend.sendNEC(data, 32);
   irrecv.enableIRIn();
   irrecv.resume();
+}
+
+void blinkStatusLed(int8_t times, unsigned long interval) {
+  blinkStatusLed(times, interval, NULL, NULL);
+}
+
+void blinkStatusLed(int8_t times, unsigned long interval, TaskOnEnable onEnable, TaskOnDisable onDisable) {
+  Serial.println("[blinkStatusLed] Called");
+  tBlink.setIterations(times);
+  tBlink.setInterval(interval);
+  tBlink.setOnEnable(onEnable);
+  tBlink.setOnDisable(onDisable);
+  taskManager.addTask(tBlink);
+  tBlink.enable();
+}
+
+void blinkStatusLedCallback() {
+  digitalWrite(STATUS_LED, !digitalRead(STATUS_LED));
+}
+
+void blinkStatusLedDisabledCallback() {
+  digitalWrite(STATUS_LED, LOW);
+  taskManager.deleteTask(tBlink);
+}
+
+void sendStatesMQTT() {
+  const size_t bufferSize = JSON_OBJECT_SIZE(1) + JSON_OBJECT_SIZE(7);
+  DynamicJsonBuffer respBuffer(bufferSize);
+  JsonObject& json = respBuffer.createObject();
+  getSettings(json);
+  String payload = "";
+  json.printTo(payload);
+  publishMQTT(StateTopic, payload);
 }
