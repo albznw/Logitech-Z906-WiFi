@@ -43,7 +43,7 @@
 #define ON_LED                D0    // The pin that is connected to the on-led on speaker system
 #define IR_LED                D2    // The IR LED pin
 #define RECV_IR               D1    // The ir reciever pin
-#define MS_BETWEEN_SENDING_IR 10    // Amount of ms to leap between sending commands in a row
+#define MS_BETWEEN_SENDING_IR 20    // Amount of ms to leap between sending commands in a row
 #include "LogitechIRCodes.h"
 
 bool OTA_ON = true; // Turn on OTA
@@ -83,6 +83,7 @@ decode_results results;  // Somewhere to store the results
 int8_t soundLevel[4]; // [Volume, Bass, Rear, Center]
 
 bool mute;
+bool isOn = false;
 
 enum Input : byte { AUX, Input1, Input2, Input3, Input4, Input5 };
 const char* inputs[] { "AUX", "Input 1", "Input 2", "Input 3", "Input 4", "Input 5" };
@@ -93,10 +94,10 @@ const char* effects[] { "Surround", "Music", "Stereo" };
 Effect currentEffectOnInput[5];
 
 // In mode On we'll change the soundlevel (defult)
-enum Mode : byte { Off, On, BassLevel, RearLevel, CenterLevel};
-const char* modes[] = { "Off", "On", "Bass level", "Rear level", "Center level" };
-Mode currentMode = Off;
-Mode lastMode = Off;
+enum Mode : byte { Standby, On, BassLevel, RearLevel, CenterLevel};
+const char* modes[] = { "Standby", "On", "Bass level", "Rear level", "Center level" };
+Mode currentMode = Standby;
+Mode lastMode = On;
 
 #define LEVEL_TIMEOUT 5000
 unsigned long levelTimeout;
@@ -122,7 +123,7 @@ Task tWifiStatus(TASK_SECOND, TASK_FOREVER, &checkWifiStatusCallback, &taskManag
 Task tBlink(200, 3, &blinkStatusLedCallback, &taskManager, false, NULL, &blinkStatusLedDisabledCallback);
 Task tSendStatesMQTT(TASK_MINUTE, TASK_FOREVER, &sendStatesMQTT, &taskManager);
 
-#define DEBUG true
+#define DEBUG false
 // conditional debugging
 #if DEBUG 
 
@@ -157,6 +158,7 @@ void setup() {
 
   pinMode(ON_LED, INPUT);
   pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, HIGH);
 
   tWifiStatus.enable();
   taskManager.execute();
@@ -174,6 +176,7 @@ void setup() {
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+  digitalWrite(STATUS_LED, LOW);
 }
 
 void loop() {
@@ -190,7 +193,7 @@ void loop() {
   handleIR();
 
   // We need to go back to On-mode after a while
-  if(currentMode >= BassLevel) {
+  if(isOn && currentMode >= BassLevel) {
     if(currentMode != lastMode) {
       levelTimeout = millis() + LEVEL_TIMEOUT;
     } else if(millis() > levelTimeout) {
@@ -262,10 +265,13 @@ void setupOTA() {
     Serial.println("Start updating " + type);
   });
   ArduinoOTA.onEnd([]() {
+    digitalWrite(STATUS_LED, HIGH);
     Serial.println("\nEnd");
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    if(progress % 5 == 0)
+      digitalWrite(STATUS_LED, !digitalRead(STATUS_LED));
   });
   ArduinoOTA.onError([](ota_error_t error) {
     Serial.printf("Error[%u]: ", error);
@@ -466,8 +472,9 @@ String handleJSONReq(String req) {
   }
   // Setters
   else if(method == "setSettings") {
-    // Turn on the speakers if they're not yet on
     if(currentMode != On) {
+       /* Turn on the speakers if they're not yet on 
+      (THIS COULD CAUSE PROBLEMS IF YOU'RE STUPID AS ME AND FORGETS ABOUT THIS)*/
       turnOn();
       // If the speakers was Off or in Level mode we have to wait until
       // it's in for sure is in On mode
@@ -508,19 +515,29 @@ String handleJSONReq(String req) {
     } else {
       json["message"] = "You didn't specify input, effect or soundlevel";
     }
-  } else if(method = "reset") {
-    soundLevel[0] = 0;
+  } 
+  
+  // reset
+  else if(method = "reset") {
+    blinkStatusLed(2, 300);
+    soundLevel[0] = 10;
+    soundLevel[1] = 25;
+    soundLevel[2] = 25;
+    soundLevel[3] = 25;
     currentInput = Input1;
     for(uint8_t i= 0; i < 5; i++) {
       currentEffectOnInput[i] = Surround;
     }
+    saveSettings();
     json["message"] = "Settings resetted";
     getSettings(json);
   }
+
+  // just else 
   else {
     String error = "Method: \"" + String(method) + "\" does not exist";
     Traceln(error);
-    server.send(400, "text/plain", error);
+    publishMQTT(DebugTopic, error);
   }
 
   json.printTo(response);
@@ -551,7 +568,7 @@ void handleIR() {
         break;
       case 0x63C98B53:
         Traceln("[handleIR] Power button pressed.");
-        currentMode = currentMode == On ? Off : On;
+        currentMode = currentMode == On ? Standby : On;
         break;
       case 0xEFA4E63F:
         Traceln("[handleIR] Input button pressed.");
@@ -693,24 +710,26 @@ void saveSettings() {
 }
 
 void turnOn() {
-  if(currentMode == Off) {
+  if(currentMode == Standby) {
     sendIR(POWER_IR);
     currentMode = On;
     saveSettings();
   }
+  checkIfStillOn();
 }
 
 void turnOff() {
-  if(currentMode != Off) {
+  if(currentMode != Standby) {
     sendIR(POWER_IR);
-    currentMode = Off;
+    currentMode = Standby;
     saveSettings();
   }
+  checkIfStillOn();
 }
 
 void togglePower() {
   sendIR(POWER_IR);
-  currentMode = currentMode == On ? Off : On;
+  currentMode = currentMode == On ? Standby : On;
   saveSettings();
 }
 
@@ -822,7 +841,12 @@ void setCurrentEffect(Effect effect) {
 
 /** Checks if speaker system is still on */
 void checkIfStillOn() {
-  currentMode = digitalRead(ON_LED) ? Off : currentMode;
+  isOn = digitalRead(ON_LED);
+  if(isOn) {
+    currentMode = currentMode == Standby ? On : currentMode;
+  } else {
+    currentMode = Standby;
+  }
 }
 
 /** Returns the strings index in const char[] array*/ 
