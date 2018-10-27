@@ -94,9 +94,9 @@ const char* effects[] { "Surround", "Music", "Stereo" };
 Effect currentEffectOnInput[5];
 
 // In mode On we'll change the soundlevel (defult)
-enum Mode : byte { Standby, On, BassLevel, RearLevel, CenterLevel};
-const char* modes[] = { "Standby", "On", "Bass level", "Rear level", "Center level" };
-Mode currentMode = Standby;
+enum Mode : byte { Off, On, BassLevel, RearLevel, CenterLevel};
+const char* modes[] = { "Off", "On", "Bass level", "Rear level", "Center level" };
+Mode currentMode = Off;
 Mode lastMode = On;
 
 #define LEVEL_TIMEOUT 5000
@@ -132,11 +132,8 @@ Task tSendStatesMQTT(TASK_MINUTE, TASK_FOREVER, &sendStatesMQTT, &taskManager);
   #define Trace2(x,y)       Serial.print      (x,y)
   #define Traceln(x)        Serial.println    (x)
   #define Traceln2(x,y)     Serial.println    (x,y)
-  #define Tracef(x)         Serial.printf     (x)
-  #define Tracef2(x,y)      Serial.printf     (x,y)
-  #define Tracef3(x,y,z)    Serial.printf     (x,y,z)
-  #define Tracef4(x,y,z,u)  Serial.printf     (x,y,z,u)
-  #define TraceFunc()       do { Trace (F("In function: ")); Serial.println(__PRETTY_FUNCTION__); } while (0)
+  #define Tracef(...)       Serial.printf     (__VA_ARGS__)
+  #define Tracefunc()       do { Trace (F("In function: ")); Serial.println(__PRETTY_FUNCTION__); } while (0)
 
 #else
   #define beginDebug()      ((void) 0)
@@ -144,17 +141,16 @@ Task tSendStatesMQTT(TASK_MINUTE, TASK_FOREVER, &sendStatesMQTT, &taskManager);
   #define Trace2(x,y)       ((void) 0)
   #define Traceln(x)        ((void) 0)
   #define Traceln2(x,y)     ((void) 0)
-  #define Tracef(x)         ((void) 0)
-  #define Tracef2(x,y)      ((void) 0)
-  #define Tracef3(x,y,z)    ((void) 0)
-  #define Tracef4(x,y,z,u)  ((void) 0)
-  #define TraceFunc()       ((void) 0)
+  #define Tracef(...)         ((void) 0)
+  #define Tracefunc()       ((void) 0)
 #endif // DEBUG
 
 void setup() {
   Serial.begin(115200);
   Serial.println("Booting");
-  printChipStatus();
+  
+  if(DEBUG)
+    printChipStatus();
 
   pinMode(ON_LED, INPUT);
   pinMode(STATUS_LED, OUTPUT);
@@ -361,7 +357,7 @@ bool connectMQTT() {
         WillQoS, WillRetain, willMessage)) {
       Traceln("MTQQ Connected!");
       if (mqttclient.subscribe(CommandTopic))
-        Tracef2("[MQTT] Sucessfully subscribed to %s\n", CommandTopic);
+        Tracef("[MQTT] Sucessfully subscribed to %s\n", CommandTopic);
       publishMQTT(DebugTopic, FirstMessage);
       return true;
     }
@@ -423,6 +419,7 @@ void checkWifiStatusCallback() {
 void WiFiDisconnectedCallback() {
   if(WiFi.getMode() == 1) {
     Serial.println("[WiFiDisconnectedCallback] Connected to WiFi!");
+    digitalWrite(STATUS_LED, LOW);
     tBlink.disable();
     tWifiStatus.setCallback(&checkWifiStatusCallback);
   }
@@ -472,14 +469,14 @@ String handleJSONReq(String req) {
   }
   // Setters
   else if(method == "setSettings") {
-    if(currentMode != On) {
-       /* Turn on the speakers if they're not yet on 
-      (THIS COULD CAUSE PROBLEMS IF YOU'RE STUPID AS ME AND FORGETS ABOUT THIS)*/
-      turnOn();
-      // If the speakers was Off or in Level mode we have to wait until
-      // it's in for sure is in On mode
-      delay(2000); // change dis later to more appropriate value
-    }
+    // if(currentMode != On) {
+    //    /* Turn on the speakers if they're not yet on 
+    //   (THIS COULD CAUSE PROBLEMS IF YOU'RE STUPID AS ME AND FORGETS ABOUT THIS)*/
+    //   turnOn();
+    //   // If the speakers was Off or in Level mode we have to wait until
+    //   // it's in for sure is in On mode
+    //   delay(2000); // change dis later to more appropriate value
+    // }
 
     bool somethingChanged = false;
 
@@ -568,7 +565,7 @@ void handleIR() {
         break;
       case 0x63C98B53:
         Traceln("[handleIR] Power button pressed.");
-        currentMode = currentMode == On ? Standby : On;
+        currentMode = currentMode == On ? Off : On;
         break;
       case 0xEFA4E63F:
         Traceln("[handleIR] Input button pressed.");
@@ -595,7 +592,7 @@ void handleIR() {
         setNextEffect();
         break;
       default:
-        Tracef2("No such ir code case: %X\n", results.value);
+        Tracef("No such ir code case: %X\n", results.value);
         irrecv.resume();
         return;
     }
@@ -710,7 +707,7 @@ void saveSettings() {
 }
 
 void turnOn() {
-  if(currentMode == Standby) {
+  if(currentMode == Off) {
     sendIR(POWER_IR);
     currentMode = On;
     saveSettings();
@@ -719,9 +716,9 @@ void turnOn() {
 }
 
 void turnOff() {
-  if(currentMode != Standby) {
+  if(currentMode != Off) {
     sendIR(POWER_IR);
-    currentMode = Standby;
+    currentMode = Off;
     saveSettings();
   }
   checkIfStillOn();
@@ -729,7 +726,7 @@ void turnOff() {
 
 void togglePower() {
   sendIR(POWER_IR);
-  currentMode = currentMode == On ? Standby : On;
+  currentMode = currentMode == On ? Off : On;
   saveSettings();
 }
 
@@ -747,7 +744,7 @@ void toggleMute() {
 
 /** Sends ir code and saves settings to change to wanted input */
 void changeInput(Input input) {
-  Tracef2("[changeInput] Changing input to: %s", inputs[input]);
+  Tracef("[changeInput] Changing input to: %s", inputs[input]);
   switch(input) {
     case AUX:
       sendIR(AUX_IR);
@@ -777,10 +774,10 @@ void changeInput(Input input) {
 
 /** Sends ir code and saves settings to change to wanted effect */
 void changeEffect(Effect effect) {
-  Tracef3("[changeEffect] Changing effect from: %s to: %s\n", effects[currentEffect()], effects[effect]);
+  Tracef("[changeEffect] Changing effect from: %s to: %s\n", effects[currentEffect()], effects[effect]);
   int8_t diff = effect - currentEffectOnInput[currentInput];
   int8_t ir_send_times = (diff >= 0) ? diff : (abs(diff) + 1) % 3;
-  Tracef3("[changeEffect] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
+  Tracef("[changeEffect] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
 
   for(uint8_t i = 0; i < ir_send_times; i++) {
     sendIR(EFFECT_IR);
@@ -796,7 +793,7 @@ void changeSoundLevel(int8_t level) {
   if(level < 0)
     level = 0;
   int8_t diff = level - soundLevel[currentLevel()];
-  Tracef4("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel[currentLevel()], level, diff);
+  Tracef("[changeSoundLevel] Setting sound level %d -> %d\tDiff: %d\n", soundLevel[currentLevel()], level, diff);
   if(diff > 1) {
     sendIR(PLUS_IR, diff);
   } else if(diff < 0) {
@@ -808,10 +805,10 @@ void changeSoundLevel(int8_t level) {
 
 /** Sends ir code and saves settings to change to wanted mode (Level) */
 void changeMode(Mode mode) {
-  Tracef3("[changeMode] Changing mode from: %s to: %s\n", modes[currentMode], modes[mode]);
+  Tracef("[changeMode] Changing mode from: %s to: %s\n", modes[currentMode], modes[mode]);
   int8_t diff = (mode - 1) - (currentMode - 1);
   int8_t ir_send_times = (diff >= 0) ? diff : (abs(diff) + 1) % 4;
-  Tracef3("[changeMode] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
+  Tracef("[changeMode] Diff: %d\t\tBlasting ir %d times\n", diff, ir_send_times);
 
   for(uint8_t i = 0; i < ir_send_times; i++) {
     sendIR(LEVEL_IR);
@@ -841,17 +838,22 @@ void setCurrentEffect(Effect effect) {
 
 /** Checks if speaker system is still on */
 void checkIfStillOn() {
+  bool lastBool = isOn;
   isOn = digitalRead(ON_LED);
   if(isOn) {
-    currentMode = currentMode == Standby ? On : currentMode;
+    currentMode = currentMode == Off ? On : currentMode;
   } else {
-    currentMode = Standby;
+    currentMode = Off;
+  }
+
+  if(lastBool != isOn) {
+    sendStatesMQTT();
   }
 }
 
 /** Returns the strings index in const char[] array*/ 
 uint8_t getStringIndex(String s, const char* array[], uint8_t len) {
-  Tracef2("[getStringIndex] Length of array: %d\n", len);
+  Tracef("[getStringIndex] Length of array: %d\n", len);
   for(uint8_t i = 0; i < len; i++) {
     if(s == array[i]) return i;
   }
