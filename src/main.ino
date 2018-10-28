@@ -469,14 +469,14 @@ String handleJSONReq(String req) {
   }
   // Setters
   else if(method == "setSettings") {
-    // if(currentMode != On) {
-    //    /* Turn on the speakers if they're not yet on 
-    //   (THIS COULD CAUSE PROBLEMS IF YOU'RE STUPID AS ME AND FORGETS ABOUT THIS)*/
-    //   turnOn();
-    //   // If the speakers was Off or in Level mode we have to wait until
-    //   // it's in for sure is in On mode
-    //   delay(2000); // change dis later to more appropriate value
-    // }
+    if(currentMode != On) {
+       /* Turn on the speakers if they're not yet on 
+      (THIS COULD CAUSE PROBLEMS IF YOU'RE STUPID AS ME AND FORGETS ABOUT THIS)*/
+      turnOn();
+      // If the speakers was Off or in Level mode we have to wait until
+      // it's for sure is in On mode
+      delay(3500); // change dis later to a more appropriate value
+    }
 
     bool somethingChanged = false;
 
