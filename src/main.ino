@@ -65,7 +65,7 @@ bool OTA_ON = true; // Turn on OTA
 const char* willMessage = MQTTClientId " has disconnected...";
 
 #define FirstMessage        "I communicate via JSON!"
-#define MQTT_MAX_PACKET_SIZE 192 //Remember to set this i platformio.ini
+#define MQTT_MAX_PACKET_SIZE 192 //Remember to set this in platformio.ini
 
 WiFiClient wificlient;  // is needed for the mqtt client
 PubSubClient mqttclient;
@@ -293,6 +293,8 @@ void setupWifiManager() {
   WiFiManager wifiManager;
   // reset saved settings
   // wifiManager.resetSettings();
+
+  wifiManager.setConfigPortalTimeout(180);
   
   // set custom ip for portal
   // wifiManager.setAPConfig(IPAddress(10,0,1,1), IPAddress(10,0,1,1), IPAddress(255,255,255,0));
@@ -305,6 +307,13 @@ void setupWifiManager() {
     wifiManager.autoConnect();
   } else {
     wifiManager.autoConnect(WIFI_MANAGER_STATION_NAME);
+  }
+
+  if(WiFi.isConnected()) {
+    Serial.print("WiFi Connected: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    ESP.restart();
   }
 }
 
