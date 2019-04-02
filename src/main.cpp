@@ -552,6 +552,7 @@ bool publishMQTT(const char* topic, String payload){
 }
 
 void checkMQTTStatusCallback() {
+  Log("Checking MQTT connection..");
   if(!mqttclient.connected()) {
     Log("[checkMQTTStatusCallback] Reconnecting to MQTT server...\n");
     connectMQTT();
@@ -917,6 +918,7 @@ void setup() {
 
   tCheckIfStillOn.enable();
   tSendStatesMQTT.enable();
+  tCheckMQTTStatus.enable();
   Serial.println("Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
