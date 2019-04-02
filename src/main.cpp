@@ -121,12 +121,14 @@ unsigned long levelTimeout;
 // Declare task methods
 void checkIfStillOn();
 void checkWifiStatusCallback();
+void checkMQTTStatusCallback();
 void blinkStatusLedCallback();
 void blinkStatusLedDisabledCallback();
 void sendStatesMQTT();
 
 Scheduler taskManager;
 Task tCheckIfStillOn(TASK_SECOND, TASK_FOREVER, &checkIfStillOn, &taskManager);
+Task tCheckMQTTStatus(TASK_MINUTE, TASK_FOREVER, &checkMQTTStatusCallback, &taskManager);
 Task tWifiStatus(TASK_SECOND, TASK_FOREVER, &checkWifiStatusCallback, &taskManager);
 Task tBlink(200, 3, &blinkStatusLedCallback, &taskManager, false, NULL, &blinkStatusLedDisabledCallback);
 Task tSendStatesMQTT(TASK_MINUTE, TASK_FOREVER, &sendStatesMQTT, &taskManager);
@@ -547,6 +549,13 @@ bool connectMQTT() {
 
 bool publishMQTT(const char* topic, String payload){
   return publishMQTT(topic, payload.c_str());
+}
+
+void checkMQTTStatusCallback() {
+  if(!mqttclient.connected()) {
+    Log("[checkMQTTStatusCallback] Reconnecting to MQTT server...\n");
+    connectMQTT();
+  }
 }
 
 String payloadToString(byte* payload, int length) {
