@@ -1,2 +1,2 @@
-# Logitech-Z906-WiFi
-WiFi enabled Logitech Z906 speakers
+# Logitech Zmart906
+Breathe new life into your Logitech Z906 Surround system with this ESP-hack. 
